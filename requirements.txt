@@ -1,0 +1,27 @@
+# UI
+PySide6>=6.6
+
+# Криптография
+pycryptodome>=3.20
+argon2-cffi>=23.1
+
+# Сеть
+requests>=2.31
+websockets>=12.0
+
+# Файлы
+watchdog>=3.0
+Pillow>=10.0
+
+# Windows-интеграция
+pywin32>=306
+pystray>=0.19
+plyer>=2.1
+
+# Медиа
+# pyaudio>=0.2  ← временно, требует C++ компилятор
+opencv-python>=4.9
+
+# Утилиты
+python-dotenv>=1.0
+loguru>=0.7
