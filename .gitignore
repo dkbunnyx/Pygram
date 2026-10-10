@@ -1,29 +1,55 @@
+# Виртуальное окружение
 .venv/
-.idea/
+venv/
+
+# Python-кэш
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+
+# Конфиденциальные данные
 .env
+.env.local
+
+# Секреты и ключи
+*.pem
+*.key
+*.enc
+.identity_*.enc
+*.auth
+
+# Сборки
 build/
 dist/
 *.spec
-downloads/
-_thumbs/
-*.db
+
+# Логи
 *.log
+logs/
+
+# Локальная БД
+*.db
 *.sqlite
 *.sqlite3
-*.egg-info/
-.Python
-*.so
-.DS_Store
-Thumbs.db
-.vscode/
-*.bak
-*.tmp
-*.pem
-*.key
-.identity_*.enc
-*.auth
-.message/
+
+# Данные мессенджера
+message/
 files/
 favorites/
+downloads/
+_thumbs/
+
+# Временные
+*.bak
+*.tmp
+
+# ОС
+.DS_Store
+Thumbs.db
