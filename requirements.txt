@@ -19,7 +19,7 @@ pystray>=0.19
 plyer>=2.1
 
 # Медиа
-# pyaudio>=0.2  ← временно, требует C++ компилятор
+sounddevice>=0.4
 opencv-python>=4.9
 
 # Утилиты
