@@ -21,11 +21,6 @@ PASSWORD_ALLOWED_RE = re.compile(r"^[a-zA-Z0-9!@#$%^&*()\-_=+.,?]+$")
 
 
 def validate_login(login: str) -> str:
-    """Проверяет логин. Возвращает нормализованный (lowercase, без пробелов).
-
-    Raises:
-        ValueError: если логин невалиден.
-    """
     if not isinstance(login, str):
         raise ValueError("Логин должен быть строкой")
 
@@ -34,14 +29,12 @@ def validate_login(login: str) -> str:
     if not login:
         raise ValueError("Логин не может быть пустым")
 
-    if not LOGIN_RE.match(login):
-        raise ValueError(
-            "Логин: 3–32 символа, только a-z и 0-9, "
-            "начинается с буквы"
-        )
-
+    # Сначала reserved — иначе "me" и "admin_chat" не дойдут
     if login in RESERVED_LOGINS:
         raise ValueError(f"Логин '{login}' зарезервирован")
+
+    if not LOGIN_RE.match(login):
+        raise ValueError("Логин: 3–32 символа, только a-z и 0-9, начинается с буквы")
 
     return login
 
