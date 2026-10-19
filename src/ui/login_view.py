@@ -22,15 +22,6 @@ class LoginView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._setup_ui()
-        self._load_theme()
-
-    def _load_theme(self):
-        try:
-            theme_path = Path(src.ui.__file__).parent / "themes" / "dark.qss"
-            if theme_path.exists():
-                self.setStyleSheet(theme_path.read_text(encoding="utf-8"))
-        except Exception as e:
-            logger.error(f"Не удалось загрузить тему: {e}")
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)

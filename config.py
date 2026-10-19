@@ -11,6 +11,8 @@ from dotenv.main import load_dotenv
 
 from src.constants import get_app_dir
 
+# Сетевой путь по умолчанию (для колледжа)
+DEFAULT_SHARED_FOLDER = r"\\Server\Share\Pygram"  # ЗАМЕНИТЬ НА ПУТЬ СЕТЕВОЙ ПАПКИ
 
 @dataclass
 class Config:
@@ -51,29 +53,18 @@ def _env_path() -> Path:
     return get_app_dir() / ".env"
 
 
-def ensure_config(shared_folder: str) -> Path:
-    """Создаёт .env с дефолтами при первом запуске.
-
-    Args:
-        shared_folder: Путь к папке шары (выбран пользователем в диалоге).
-
-    Returns:
-        Path: Путь к созданному .env.
-
-    Raises:
-        FileExistsError: если .env уже существует (не перезаписываем).
-        ValueError: если shared_folder пустой.
-    """
-    if not shared_folder or not shared_folder.strip():
-        raise ValueError("shared_folder не может быть пустым")
-
+def ensure_config(shared_folder: str | None = None) -> Path:
+    """Создает .env с дефолтными настройками."""
     env_path = _env_path()
     if env_path.exists():
-        raise FileExistsError(f".env уже существует: {env_path}")
+        return env_path
+
+    # Если путь не передан, берем дефолтный сетевой
+    if shared_folder is None:
+        shared_folder = DEFAULT_SHARED_FOLDER
 
     backup_folder = str(get_app_dir() / "backups")
     content = (
-        f"# Pygram config (создан автоматически при первом запуске)\n"
         f"SHARED_FOLDER={shared_folder}\n"
         f"BACKUP_FOLDER={backup_folder}\n"
         f"LOG_LEVEL=INFO\n"
