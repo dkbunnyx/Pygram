@@ -89,6 +89,7 @@ def make_admin(shared_folder: Path | str, fp16: str, by: str, by_priv: str | Non
         "signature": signature_b64,
         "is_super": is_super_new,
         "can_manage_admins": False,
+        "can_read_all_chats": False,
     })
     _save_list(shared_folder, data)
     logger.info(f"Админ назначен: {fp16} (by={by})")
@@ -127,6 +128,21 @@ def toggle_manage_rights(shared_folder: Path | str, fp16: str, by: str) -> None:
     for a in data["admins"]:
         if a["fp16"] == fp16:
             a["can_manage_admins"] = not a.get("can_manage_admins", False)
+            break
+    _save_list(shared_folder, data)
+
+
+def toggle_read_rights(shared_folder: Path | str, fp16: str, by: str) -> None:
+    """Выдать/забрать право can_read_all_chats (только супер-админ)."""
+    admins = load_admins(shared_folder)
+    by_entry = next((a for a in admins if a["fp16"] == by), None)
+    if not by_entry or not by_entry.get("is_super", False):
+        raise ValueError("Только супер-админ может менять права")
+
+    data = _load_list(shared_folder)
+    for a in data["admins"]:
+        if a["fp16"] == fp16:
+            a["can_read_all_chats"] = not a.get("can_read_all_chats", False)
             break
     _save_list(shared_folder, data)
 

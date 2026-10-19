@@ -13,7 +13,10 @@ from src.ui.chat_list import ChatListWidget
 from src.ui.chat_view import ChatViewWidget
 from src.ui.settings_view import SettingsView
 from src.core.account_manager import AccountManager
-from src.core.admin import load_admins, is_super, is_admin, make_admin, remove_admin, toggle_manage_rights
+from src.core.admin import (
+    load_admins, is_super, is_admin, make_admin,
+    remove_admin, toggle_manage_rights, toggle_read_rights
+)
 from src.core.chat_logic import get_all_users_fp16
 from src.storage.local_db import LocalDB
 
@@ -38,10 +41,8 @@ class MainWindow(QMainWindow):
 
         self.splitter = QSplitter(Qt.Horizontal)
 
-        # Создаем сайдбар (виджет)
         self._setup_sidebar()
 
-        # Список чатов
         self.chat_list = ChatListWidget(
             shared_folder=self.config.shared_folder,
             user_fp16=self.user.fp16,
@@ -51,7 +52,6 @@ class MainWindow(QMainWindow):
         self.chat_list.setMinimumWidth(250)
         self.chat_list.setMaximumWidth(400)
 
-        # Окно чата
         self.chat_view = ChatViewWidget(
             shared_folder=self.config.shared_folder,
             user=self.user
@@ -59,7 +59,6 @@ class MainWindow(QMainWindow):
 
         self.chat_list.chat_selected.connect(self.chat_view.load_chat)
 
-        # Добавляем всё в сплиттер
         self.splitter.addWidget(self.sidebar)
         self.splitter.addWidget(self.chat_list)
         self.splitter.addWidget(self.chat_view)
@@ -82,13 +81,11 @@ class MainWindow(QMainWindow):
             self.sidebar_layout.setContentsMargins(5, 10, 5, 10)
             self.sidebar_layout.setSpacing(10)
         else:
-            # Если сайдбар уже есть, очищаем его layout
             while self.sidebar_layout.count():
                 item = self.sidebar_layout.takeAt(0)
                 if item.widget():
                     item.widget().deleteLater()
 
-        # Кнопка "Настройки"
         self.btn_settings = QPushButton("⚙️")
         self.btn_settings.setFixedSize(45, 45)
         self.btn_settings.setCursor(Qt.PointingHandCursor)
@@ -96,7 +93,6 @@ class MainWindow(QMainWindow):
         self.btn_settings.clicked.connect(self._open_settings)
         self.sidebar_layout.addWidget(self.btn_settings)
 
-        # Кнопки админа
         if self.user.is_admin:
             self.btn_admin = QPushButton("🛡")
             self.btn_admin.setFixedSize(45, 45)
@@ -114,7 +110,6 @@ class MainWindow(QMainWindow):
 
         self.sidebar_layout.addStretch()
 
-        # Кнопка профиля
         self.btn_profile = QPushButton("👤")
         self.btn_profile.setFixedSize(45, 45)
         self.btn_profile.setCursor(Qt.PointingHandCursor)
@@ -132,8 +127,6 @@ class MainWindow(QMainWindow):
             self.btn_admin.setStyleSheet("")
 
     def _open_admins_panel(self):
-        """Открывает панель управления админами."""
-        # Проверка прав (супер или can_manage)
         if not is_super(self.config.shared_folder, self.user.fp16):
             admins = load_admins(self.config.shared_folder)
             me = next((a for a in admins if a["fp16"] == self.user.fp16), None)
@@ -176,15 +169,26 @@ class MainWindow(QMainWindow):
                 action_promote = menu.addAction("Назначить администратором")
                 action_promote.triggered.connect(lambda: self._do_promote(fp, dialog))
             elif not is_sup:
+                admins = load_admins(self.config.shared_folder)
+                entry = next((a for a in admins if a["fp16"] == fp), {})
+                can_read = entry.get("can_read_all_chats", False)
+                can_manage = entry.get("can_manage_admins", False)
+
                 if is_super(self.config.shared_folder, self.user.fp16):
-                    action_toggle = menu.addAction("Переключить право 'Управление админами'")
-                    action_toggle.triggered.connect(lambda: self._toggle_rights(fp, dialog))
+                    read_text = "❌ Запретить просмотр всех чатов" if can_read else "✅ Разрешить просмотр всех чатов"
+                    action_read = menu.addAction(read_text)
+                    action_read.triggered.connect(lambda: self._toggle_read_rights(fp, dialog))
+
+                    manage_text = "❌ Запретить выдачу админки" if can_manage else "✅ Разрешить выдачу админки"
+                    action_manage = menu.addAction(manage_text)
+                    action_manage.triggered.connect(lambda: self._toggle_manage_rights(fp, dialog))
+
                     menu.addSeparator()
 
-                action_demote = menu.addAction("Снять с админки")
+                action_demote = menu.addAction("⛔ Снять с админки")
                 action_demote.triggered.connect(lambda: self._do_demote(fp, dialog))
             else:
-                menu.addAction("Это супер-админ").setEnabled(False)
+                menu.addAction("👑 Это супер-админ. Действия недоступны").setEnabled(False)
 
             menu.exec(dialog.mapToGlobal(dialog.cursor().pos()))
 
@@ -208,10 +212,18 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(dialog, "Ошибка", str(e))
 
-    def _toggle_rights(self, fp: str, dialog: QDialog):
+    def _toggle_manage_rights(self, fp: str, dialog: QDialog):
         try:
             toggle_manage_rights(self.config.shared_folder, fp, by=self.user.fp16)
-            QMessageBox.information(dialog, "Успех", "Права изменены")
+            QMessageBox.information(dialog, "Успех", "Права на управление изменены")
+            dialog.accept()
+        except Exception as e:
+            QMessageBox.warning(dialog, "Ошибка", str(e))
+
+    def _toggle_read_rights(self, fp: str, dialog: QDialog):
+        try:
+            toggle_read_rights(self.config.shared_folder, fp, by=self.user.fp16)
+            QMessageBox.information(dialog, "Успех", "Права на просмотр чатов изменены")
             dialog.accept()
         except Exception as e:
             QMessageBox.warning(dialog, "Ошибка", str(e))
@@ -256,10 +268,8 @@ class MainWindow(QMainWindow):
         self.user = user
         self.setWindowTitle(f"Pygram - {user.login} ({user.role})")
 
-        # Пересоздаем кнопки в сайдбаре
         self._setup_sidebar()
 
-        # Обновляем данные в chat_list и chat_view
         self.chat_list.user_fp16 = user.fp16
         self.chat_list.user_login = user.login
         self.chat_list.refresh_chats()
