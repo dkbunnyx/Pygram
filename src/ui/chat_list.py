@@ -10,6 +10,11 @@ from loguru import logger
 
 from src.core.chat_logic import list_user_chats, create_favorites
 
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QListWidget,
+    QListWidgetItem, QPushButton, QInputDialog, QMessageBox
+)
+
 
 class ChatListWidget(QWidget):
     """Список чатов пользователя."""
@@ -88,10 +93,27 @@ class ChatListWidget(QWidget):
             self.chat_selected.emit(chat_id)
 
     def _on_new_chat_clicked(self):
-        try:
-            # Передаем ЛОГИН, а не fp16
-            create_favorites(self.shared_folder, self.user_login)
-            self.refresh_chats()
-            logger.info("Создано Избранное")
-        except Exception as e:
-            logger.error(f"Ошибка создания чата: {e}")
+        """Создает новый DM-чат с выбранным пользователем."""
+        from src.core.chat_logic import create_dm_chat
+
+        login, ok = QInputDialog.getText(
+            self, "Новый чат",
+            "Введите логин пользователя:"
+        )
+
+        if ok and login.strip():
+            login = login.strip().lower()
+            try:
+                chat_id = create_dm_chat(self.shared_folder, self.user_login, login)
+                self.refresh_chats()
+
+                # Автоматически выбираем созданный чат в списке
+                for i in range(self.list_widget.count()):
+                    item = self.list_widget.item(i)
+                    if item.data(Qt.UserRole) == chat_id:
+                        self.list_widget.setCurrentItem(item)
+                        self.chat_selected.emit(chat_id)
+                        break
+
+            except Exception as e:
+                QMessageBox.warning(self, "Ошибка", str(e))

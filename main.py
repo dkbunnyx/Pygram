@@ -57,7 +57,7 @@ def main():
     sessions = list_saved_sessions()
 
     if sessions:
-        last_session = sessions[-1]
+        last_session = sessions[0]  # <--- БЕРЕМ ПЕРВОГО (САМОГО СВЕЖЕГО)
         window = SessionView(last_session, config.shared_folder)
         window.logged_in.connect(on_logged_in)
 

@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 from loguru import logger
-
+from src.storage.local_db import LocalDB
 from src.core.message import read_messages, send_message
 from src.core.chat_logic import get_chat_meta
 
@@ -87,24 +87,26 @@ class ChatViewWidget(QWidget):
                 self.text_browser.setHtml("<i>Нет сообщений. Напишите первым!</i>")
                 return
 
+            db = LocalDB()
+
             html = ""
             for msg in messages:
                 is_me = (msg.sender_fp16 == self.user.fp16)
                 color = "#4a90e2" if is_me else "#e2a04a"
                 align = "right" if is_me else "left"
 
-                # Если это ты — пишем "Вы", иначе первые 8 символов fp16
-                sender_name = "Вы" if is_me else msg.sender_fp16[:8]
+                # Получаем логин из БД
+                sender_name = "Вы" if is_me else db.get_login_by_fp16(msg.sender_fp16)
 
                 html += f"""
-                <div style="text-align: {align}; margin: 5px;">
-                    <span style="color: {color}; font-weight: bold;">{sender_name}</span>
-                    <br>
-                    <span style="background: #2a2a2a; padding: 5px 10px; border-radius: 10px; display: inline-block;">
-                        {msg.text}
-                    </span>
-                </div>
-                """
+                           <div style="text-align: {align}; margin: 5px;">
+                               <span style="color: {color}; font-weight: bold;">{sender_name}</span>
+                               <br>
+                               <span style="background: #2a2a2a; padding: 5px 10px; border-radius: 10px; display: inline-block;">
+                                   {msg.text}
+                               </span>
+                           </div>
+                           """
 
             self.text_browser.setHtml(html)
             self.text_browser.verticalScrollBar().setValue(

@@ -64,6 +64,13 @@ class LocalDB:
             )
         """)
         cursor.execute(f"PRAGMA user_version = {DB_VERSION}")
+        #Таблица соответствия fp16 -> login
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users_map (
+                fp16 TEXT PRIMARY KEY,
+                login TEXT NOT NULL
+            )
+        """)
         conn.commit()
         logger.info(f"БД инициализирована: {self.path}")
 
@@ -125,3 +132,16 @@ class LocalDB:
         cursor = self._get_conn().execute("SELECT value FROM settings WHERE key = ?", (key,))
         row = cursor.fetchone()
         return row["value"] if row else default
+    # ========================================================================
+    # Маппинг пользователей (fp16 -> login)
+    # ========================================================================
+
+    def save_user_map(self, fp16: str, login: str):
+        conn = self._get_conn()
+        conn.execute("INSERT OR REPLACE INTO users_map (fp16, login) VALUES (?, ?)", (fp16, login))
+        conn.commit()
+
+    def get_login_by_fp16(self, fp16: str) -> str:
+        cursor = self._get_conn().execute("SELECT login FROM users_map WHERE fp16 = ?", (fp16,))
+        row = cursor.fetchone()
+        return row["login"] if row else fp16[:8]  # Если не нашли, возвращаем обрезок fp16

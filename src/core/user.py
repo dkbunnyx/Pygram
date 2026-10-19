@@ -38,11 +38,18 @@ def register_user(shared_folder: Path | str, login: str, password: str) -> User:
         make_admin(shared_folder, fp16, by="system")
         logger.info(f"Первый пользователь {login} назначен супер-админом")
 
-    full_fp = load_login_marker(shared_folder, login)["fp"]
-    pub_pem = load_pub_key(shared_folder, full_fp)
+    # --- СОЗДАЕМ ИЗБРАННОЕ ---
+    from src.core.chat_logic import create_favorites
+    try:
+        create_favorites(shared_folder, login)
+        logger.info(f"Для пользователя {login} создано Избранное")
+    except Exception as e:
+        logger.error(f"Не удалось создать Избранное: {e}")
+    # --------------------------
 
-    user = User(login=login, fp16=fp16, priv_pem="", pub_pem=pub_pem, is_admin=is_admin(shared_folder, fp16))
-    _save_session(user)
+    # Сразу логиним пользователя, чтобы получить приватный ключ в память
+    user = login_user(shared_folder, login, password)
+
     return user
 
 
@@ -51,8 +58,20 @@ def login_user(shared_folder: Path | str, login: str, password: str) -> User:
     full_fp = load_login_marker(shared_folder, login)["fp"]
     pub_pem = load_pub_key(shared_folder, full_fp)
 
-    user = User(login=login, fp16=fp16, priv_pem=priv_pem, pub_pem=pub_pem, is_admin=is_admin(shared_folder, fp16))
+    user = User(
+        login=login,
+        fp16=fp16,
+        priv_pem=priv_pem,
+        pub_pem=pub_pem,
+        is_admin=is_admin(shared_folder, fp16),
+    )
     _save_session(user)
+
+    # Сохраняем в локальную БД для отображения имен
+    from src.storage.local_db import LocalDB
+    db = LocalDB()
+    db.save_user_map(user.fp16, user.login)
+
     logger.info(f"Пользователь вошёл: {login} (fp16={fp16})")
     return user
 
@@ -68,15 +87,18 @@ def _get_ttl() -> int:
 
 def _save_session(user: User) -> None:
     now = int(time.time() * 1000)
+    ttl = _get_ttl()
     data = {
         "login": user.login,
         "fp16": user.fp16,
         "created_at": now,
-        "expires_at": now + _get_ttl() * 1000,
-        "boot_time": int(psutil.boot_time()),  # <--- ЧЕСТНЫЙ BOOT TIME
+        "expires_at": now + ttl * 1000,
+        "boot_time": int(psutil.boot_time()),
+        "last_login": now,  # <--- ДОБАВИЛИ ЭТО
     }
-    _session_path(user.fp16).write_text(json.dumps(data), encoding="utf-8")
-    logger.debug(f"Сессия сохранена: {user.fp16}")
+    path = _session_path(user.fp16)
+    path.write_text(json.dumps(data), encoding="utf-8")
+    logger.debug(f"Сессия сохранена: {path}")
 
 def logout_user(user: User) -> None:
     p = _session_path(user.fp16)
@@ -103,6 +125,20 @@ def load_saved_session(fp16: str) -> dict | None:
 
     return data
 
+
 def list_saved_sessions() -> list[dict]:
     local_dir = get_local_dir()
-    return [load_saved_session(e.name[9:]) for e in local_dir.iterdir() if e.is_file() and e.name.startswith(".session_") and load_saved_session(e.name[9:])]
+    result = []
+    for entry in local_dir.iterdir():
+        if not entry.is_file():
+            continue
+        if not entry.name.startswith(".session_"):
+            continue
+        fp16 = entry.name[len(".session_"):]
+        data = load_saved_session(fp16)
+        if data:
+            result.append(data)
+
+    # Сортируем по last_login: самый свежий — первый
+    result.sort(key=lambda x: x.get("last_login", 0), reverse=True)
+    return result
