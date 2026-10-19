@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from src.core.crypto import fingerprint, load_private_key
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,12 +12,14 @@ from loguru import logger
 
 from src.core.crypto import (
     aes_decrypt, aes_encrypt, from_base64, rsa_sign, rsa_verify, to_base64,
-    unwrap_key, hybrid_encrypt, hybrid_decrypt
+    unwrap_key, hybrid_encrypt, hybrid_decrypt, fingerprint, load_private_key
 )
+from src.core.admin import load_admins
 from src.storage.shared_store import (
     chat_message_dir, load_chat_keys, load_chat_meta, load_chat_meta_enc,
     load_pub_key_by_fp16, write_bytes_atomic
 )
+
 
 @dataclass
 class Message:
@@ -28,12 +29,14 @@ class Message:
     ts: int
     msg_id: str
 
+
 def _get_group_key(shared_folder: Path | str, chat_id: str, my_fp16: str, my_priv_pem: str) -> bytes:
     keys_data = load_chat_keys(shared_folder, chat_id)
     wrapped_keys = keys_data.get("wrapped", {})
     if my_fp16 not in wrapped_keys:
         raise ValueError(f"У вас нет доступа к чату {chat_id}")
     return unwrap_key(wrapped_keys, my_fp16, my_priv_pem)
+
 
 def send_message(shared_folder: Path | str, chat_id: str, sender_fp16: str, sender_priv_pem: str, text: str) -> str:
     if not text or not isinstance(text, str):
@@ -52,8 +55,12 @@ def send_message(shared_folder: Path | str, chat_id: str, sender_fp16: str, send
         enc = load_chat_meta_enc(shared_folder, chat_id)
         participants = json.loads(enc.decode("utf-8")).get("participants", [])
 
+        # ЧЕСТНОСТЬ: Заворачиваем ключи не только для участников, но и для всех админов
+        admins = [a["fp16"] for a in load_admins(shared_folder)]
+        all_recipients = set(participants) | set(admins)
+
         recipients = {}
-        for p_fp in participants:
+        for p_fp in all_recipients:
             try:
                 recipients[p_fp] = load_pub_key_by_fp16(shared_folder, p_fp)
             except FileNotFoundError:
@@ -84,6 +91,7 @@ def send_message(shared_folder: Path | str, chat_id: str, sender_fp16: str, send
 
     return msg_id
 
+
 def read_messages(shared_folder: Path | str, chat_id: str, my_fp16: str, my_priv_pem: str) -> list[Message]:
     meta = load_chat_meta(shared_folder, chat_id)
     chat_type = meta["type"]
@@ -91,7 +99,11 @@ def read_messages(shared_folder: Path | str, chat_id: str, my_fp16: str, my_priv
     if chat_type == "dm":
         enc = load_chat_meta_enc(shared_folder, chat_id)
         participants = json.loads(enc.decode("utf-8")).get("participants", [])
-        if my_fp16 not in participants:
+
+        # Админы тоже имеют право читать DM-чаты
+        admins = [a["fp16"] for a in load_admins(shared_folder)]
+
+        if my_fp16 not in participants and my_fp16 not in admins:
             raise ValueError(f"У вас нет доступа к чату {chat_id}")
 
     group_key = None
@@ -124,6 +136,7 @@ def read_messages(shared_folder: Path | str, chat_id: str, my_fp16: str, my_priv
                 data_to_check = from_base64(pkg["nonce"]) + from_base64(pkg["ciphertext"])
                 if not rsa_verify(sender_pub, data_to_check, signature):
                     continue
+
                 # Вычисляем полный fingerprint из нашего приватного ключа
                 my_pub_pem = load_private_key(my_priv_pem).publickey().export_key().decode("ascii")
                 my_full_fp = fingerprint(my_pub_pem)

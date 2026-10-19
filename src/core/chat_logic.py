@@ -169,16 +169,29 @@ def is_chat_visible(shared_folder: Path | str, chat_id: str, fp16: str) -> bool:
 
 
 def list_user_chats(shared_folder: Path | str, fp16: str) -> list[dict]:
-    meta_dir = Path(shared_folder) / ".meta"  # <--- ДОБАВИЛИ Path()
+    """Возвращает список чатов, видимых пользователю (для ЛИЧНОГО списка)."""
+    meta_dir = Path(shared_folder) / ".meta"
     if not meta_dir.is_dir(): return []
 
     result = []
     for entry in meta_dir.glob("*.json"):
         if entry.name.endswith(".keys.json"): continue
         chat_id = entry.stem
+
+        # ЖЕСТКАЯ ЗАЩИТА: Избранное (fav_) видит ТОЛЬКО владелец.
+        # Даже админ не должен видеть чужое Избранное в своем личном списке.
+        if chat_id.startswith("fav_"):
+            owner_fp = chat_id.replace("fav_", "")
+            if owner_fp != fp16:
+                continue  # Пропускаем (не наше избранное)
+
+        # Для остальных чатов проверяем видимость (участник или админ)
         if is_chat_visible(shared_folder, chat_id, fp16):
-            try: result.append(load_chat_meta(shared_folder, chat_id))
-            except (FileNotFoundError, ValueError): continue
+            try:
+                result.append(load_chat_meta(shared_folder, chat_id))
+            except (FileNotFoundError, ValueError):
+                continue
+
     return sorted(result, key=lambda m: m.get("created_at", 0), reverse=True)
 
 
@@ -202,3 +215,29 @@ def get_chat_recipients(shared_folder: Path | str, chat_id: str) -> list[str]:
     for admin_fp in _get_all_admin_fp16s(shared_folder):
         if admin_fp not in recipients: recipients.append(admin_fp)
     return recipients
+def list_all_chats(shared_folder: Path | str) -> list[dict]:
+    """Возвращает ВСЕ чаты в шаре (только для админской панели)."""
+    meta_dir = Path(shared_folder) / ".meta"
+    if not meta_dir.is_dir(): return []
+
+    result = []
+    for entry in meta_dir.glob("*.json"):
+        if entry.name.endswith(".keys.json"): continue
+        try:
+            result.append(load_chat_meta(shared_folder, entry.stem))
+        except Exception:
+            continue
+    return sorted(result, key=lambda m: m.get("created_at", 0), reverse=True)
+
+def get_all_users_fp16(shared_folder: Path | str) -> list[str]:
+    keys_dir = Path(shared_folder) / ".keys"
+    if not keys_dir.is_dir(): return []
+    # Берем имена файлов и отрезаем .pub.pem
+    return [f.name.replace(".pub.pem", "") for f in keys_dir.glob("*.pub.pem")]
+
+def get_all_users_fp16(shared_folder: Path | str) -> list[str]:
+    """Возвращает fp16 всех пользователей (по наличию .pub.pem)."""
+    keys_dir = Path(shared_folder) / ".keys"
+    if not keys_dir.is_dir(): return []
+    return [f.name.replace(".pub.pem", "") for f in keys_dir.glob("*.pub.pem")]
+
