@@ -250,3 +250,87 @@ def load_identity_blob(shared_folder: Path | str, fp: str) -> bytes:
     """
     path = identity_path(shared_folder, fp)
     return path.read_bytes()
+# ============================================================================
+# ЧАТЫ: .meta/ и групповые ключи
+# ============================================================================
+
+def chat_meta_path(shared_folder: Path | str, chat_id: str) -> Path:
+    """Путь к метаданным чата: .meta/<chat_id>.json"""
+    return safe_join(shared_folder, DIR_META, f"{chat_id}.json")
+
+
+def chat_meta_enc_path(shared_folder: Path | str, chat_id: str) -> Path:
+    """Путь к зашифрованным метаданным: .meta/<chat_id>.enc"""
+    return safe_join(shared_folder, DIR_META, f"{chat_id}.enc")
+
+
+def chat_keys_path(shared_folder: Path | str, chat_id: str) -> Path:
+    """Путь к обёрткам group_key: .meta/<chat_id>.keys.json"""
+    return safe_join(shared_folder, DIR_META, f"{chat_id}.keys.json")
+
+
+def save_chat_meta(shared_folder: Path | str, chat_id: str, meta: dict) -> Path:
+    """Сохраняет открытые метаданные чата."""
+    path = chat_meta_path(shared_folder, chat_id)
+    write_json_atomic(path, meta)
+    return path
+
+
+def load_chat_meta(shared_folder: Path | str, chat_id: str) -> dict:
+    """Загружает открытые метаданные чата."""
+    return read_json(chat_meta_path(shared_folder, chat_id))
+
+
+def save_chat_meta_enc(shared_folder: Path | str, chat_id: str, blob: bytes) -> Path:
+    """Сохраняет зашифрованные метаданные чата."""
+    path = chat_meta_enc_path(shared_folder, chat_id)
+    write_bytes_atomic(path, blob)
+    return path
+
+
+def load_chat_meta_enc(shared_folder: Path | str, chat_id: str) -> bytes:
+    """Загружает зашифрованные метаданные чата."""
+    return chat_meta_enc_path(shared_folder, chat_id).read_bytes()
+
+
+def save_chat_keys(shared_folder: Path | str, chat_id: str, keys: dict) -> Path:
+    """Сохраняет обёртки group_key (JSON)."""
+    path = chat_keys_path(shared_folder, chat_id)
+    write_json_atomic(path, keys)
+    return path
+
+
+def load_chat_keys(shared_folder: Path | str, chat_id: str) -> dict:
+    """Загружает обёртки group_key."""
+    return read_json(chat_keys_path(shared_folder, chat_id))
+
+
+# ============================================================================
+# ПАПКИ СООБЩЕНИЙ / ФАЙЛОВ
+# ============================================================================
+
+def chat_message_dir(shared_folder: Path | str, chat_id: str) -> Path:
+    """Путь к папке сообщений: message/<chat_id>/"""
+    return safe_join(shared_folder, DIR_MESSAGE, chat_id)
+
+
+def chat_files_dir(shared_folder: Path | str, chat_id: str) -> Path:
+    """Путь к папке вложений: files/<chat_id>/"""
+    return safe_join(shared_folder, DIR_FILES, chat_id)
+
+
+def ensure_chat_folders(shared_folder: Path | str, chat_id: str) -> None:
+    """Создаёт папки для чата: message/<id>/, files/<id>/, .status/<id>/"""
+    chat_message_dir(shared_folder, chat_id).mkdir(parents=True, exist_ok=True)
+    chat_files_dir(shared_folder, chat_id).mkdir(parents=True, exist_ok=True)
+    safe_join(shared_folder, DIR_STATUS, chat_id).mkdir(parents=True, exist_ok=True)
+
+
+def load_pub_key_by_fp16(shared_folder: Path | str, fp16: str) -> str:
+    """Загружает публичный ключ по короткому fp16.
+
+    Raises:
+        FileNotFoundError: если ключа нет.
+    """
+    path = safe_join(shared_folder, DIR_KEYS, f"{fp16}.pub.pem")
+    return path.read_text(encoding="ascii")
