@@ -1,134 +1,105 @@
-"""Сообщения Pygram: отправка, чтение, шифрование.
-
-Схема:
-    1. Сообщение шифруется group_key (AES-256-GCM).
-    2. Шифротекст подписывается RSA-PSS приватником отправителя.
-    3. Сохраняется в message/<chat_id>/<ts>_<fp16>_<uuid>.bin
-"""
+"""Сообщения Pygram."""
 
 from __future__ import annotations
 
 import json
 import time
 import uuid
+from src.core.crypto import fingerprint, load_private_key
+from dataclasses import dataclass
 from pathlib import Path
 
 from loguru import logger
 
 from src.core.crypto import (
-    aes_decrypt,
-    aes_encrypt,
-    from_base64,
-    rsa_sign,
-    rsa_verify,
-    to_base64,
-    unwrap_key,
+    aes_decrypt, aes_encrypt, from_base64, rsa_sign, rsa_verify, to_base64,
+    unwrap_key, hybrid_encrypt, hybrid_decrypt
 )
 from src.storage.shared_store import (
-    chat_message_dir,
-    load_chat_keys,
-    load_pub_key_by_fp16,
-    write_bytes_atomic,
+    chat_message_dir, load_chat_keys, load_chat_meta, load_chat_meta_enc,
+    load_pub_key_by_fp16, write_bytes_atomic
 )
 
-
+@dataclass
 class Message:
-    """Расшифрованное сообщение."""
+    chat_id: str
+    sender_fp16: str
+    text: str
+    ts: int
+    msg_id: str
 
-    def __init__(
-        self,
-        chat_id: str,
-        sender_fp16: str,
-        text: str,
-        ts: int,
-        msg_id: str,
-    ):
-        self.chat_id = chat_id
-        self.sender_fp16 = sender_fp16
-        self.text = text
-        self.ts = ts
-        self.msg_id = msg_id
-
-    def __repr__(self) -> str:
-        return f"<Message {self.msg_id} from {self.sender_fp16}: {self.text[:20]}>"
-
-
-def _get_group_key(
-    shared_folder: Path | str,
-    chat_id: str,
-    my_fp16: str,
-    my_priv_pem: str,
-) -> bytes:
-    """Достаёт и расшифровывает group_key для текущего пользователя."""
+def _get_group_key(shared_folder: Path | str, chat_id: str, my_fp16: str, my_priv_pem: str) -> bytes:
     keys_data = load_chat_keys(shared_folder, chat_id)
     wrapped_keys = keys_data.get("wrapped", {})
-
     if my_fp16 not in wrapped_keys:
         raise ValueError(f"У вас нет доступа к чату {chat_id}")
-
     return unwrap_key(wrapped_keys, my_fp16, my_priv_pem)
 
-
-def send_message(
-    shared_folder: Path | str,
-    chat_id: str,
-    sender_fp16: str,
-    sender_priv_pem: str,
-    text: str,
-) -> str:
-    """Шифрует, подписывает и сохраняет сообщение.
-
-    Returns:
-        msg_id (имя файла без .bin).
-    """
+def send_message(shared_folder: Path | str, chat_id: str, sender_fp16: str, sender_priv_pem: str, text: str) -> str:
     if not text or not isinstance(text, str):
         raise ValueError("Текст сообщения не может быть пустым")
 
-    group_key = _get_group_key(shared_folder, chat_id, sender_fp16, sender_priv_pem)
+    meta = load_chat_meta(shared_folder, chat_id)
+    chat_type = meta["type"]
 
     ts = int(time.time() * 1000)
     msg_uuid = str(uuid.uuid4())[:8]
     msg_id = f"{ts}_{sender_fp16}_{msg_uuid}"
 
-    # Шифрование
     aad = f"chat_id={chat_id}|sender={sender_fp16}|ts={ts}".encode("utf-8")
-    nonce, ciphertext = aes_encrypt(group_key, text.encode("utf-8"), aad=aad)
 
-    # Подпись (подписываем nonce+ciphertext, чтобы никто не подменил)
-    data_to_sign = nonce + ciphertext
-    signature = rsa_sign(sender_priv_pem, data_to_sign)
+    if chat_type == "dm":
+        enc = load_chat_meta_enc(shared_folder, chat_id)
+        participants = json.loads(enc.decode("utf-8")).get("participants", [])
 
-    container = {
-        "version": 1,
-        "sender_fp16": sender_fp16,
-        "ts": ts,
-        "nonce": to_base64(nonce),
-        "ciphertext": to_base64(ciphertext),
-        "signature": to_base64(signature),
-    }
+        recipients = {}
+        for p_fp in participants:
+            try:
+                recipients[p_fp] = load_pub_key_by_fp16(shared_folder, p_fp)
+            except FileNotFoundError:
+                pass
 
-    # Сохранение
+        pkg = hybrid_encrypt(text.encode("utf-8"), recipients, aad=aad)
+        container = {
+            "version": 1, "sender_fp16": sender_fp16, "ts": ts,
+            "nonce": pkg["nonce"], "ciphertext": pkg["ciphertext"],
+            "wrapped_keys": pkg["wrapped_keys"],
+        }
+        data_to_sign = from_base64(pkg["nonce"]) + from_base64(pkg["ciphertext"])
+        container["signature"] = to_base64(rsa_sign(sender_priv_pem, data_to_sign))
+    else:
+        group_key = _get_group_key(shared_folder, chat_id, sender_fp16, sender_priv_pem)
+        nonce, ciphertext = aes_encrypt(group_key, text.encode("utf-8"), aad=aad)
+        signature = rsa_sign(sender_priv_pem, nonce + ciphertext)
+
+        container = {
+            "version": 1, "sender_fp16": sender_fp16, "ts": ts,
+            "nonce": to_base64(nonce), "ciphertext": to_base64(ciphertext),
+            "signature": to_base64(signature),
+        }
+
     msg_dir = chat_message_dir(shared_folder, chat_id)
     msg_dir.mkdir(parents=True, exist_ok=True)
-    msg_path = msg_dir / f"{msg_id}.bin"
+    write_bytes_atomic(msg_dir / f"{msg_id}.bin", json.dumps(container).encode("utf-8"))
 
-    write_bytes_atomic(msg_path, json.dumps(container).encode("utf-8"))
-    logger.debug(f"Сообщение отправлено: {chat_id}/{msg_id}")
     return msg_id
 
+def read_messages(shared_folder: Path | str, chat_id: str, my_fp16: str, my_priv_pem: str) -> list[Message]:
+    meta = load_chat_meta(shared_folder, chat_id)
+    chat_type = meta["type"]
 
-def read_messages(
-    shared_folder: Path | str,
-    chat_id: str,
-    my_fp16: str,
-    my_priv_pem: str,
-) -> list[Message]:
-    """Читает, расшифровывает и проверяет все сообщения в чате."""
-    group_key = _get_group_key(shared_folder, chat_id, my_fp16, my_priv_pem)
+    if chat_type == "dm":
+        enc = load_chat_meta_enc(shared_folder, chat_id)
+        participants = json.loads(enc.decode("utf-8")).get("participants", [])
+        if my_fp16 not in participants:
+            raise ValueError(f"У вас нет доступа к чату {chat_id}")
+
+    group_key = None
+    if chat_type != "dm":
+        group_key = _get_group_key(shared_folder, chat_id, my_fp16, my_priv_pem)
 
     msg_dir = chat_message_dir(shared_folder, chat_id)
-    if not msg_dir.is_dir():
-        return []
+    if not msg_dir.is_dir(): return []
 
     messages = []
     for msg_file in msg_dir.glob("*.bin"):
@@ -136,34 +107,37 @@ def read_messages(
             container = json.loads(msg_file.read_text(encoding="utf-8"))
             sender = container["sender_fp16"]
             ts = container["ts"]
-            nonce = from_base64(container["nonce"])
-            ciphertext = from_base64(container["ciphertext"])
             signature = from_base64(container["signature"])
 
-            # 1. Проверяем подпись
             try:
                 sender_pub = load_pub_key_by_fp16(shared_folder, sender)
             except FileNotFoundError:
-                logger.warning(f"Ключ отправителя {sender} не найден")
                 continue
 
-            if not rsa_verify(sender_pub, nonce + ciphertext, signature):
-                logger.warning(f"Подпись не совпала (подмена?): {msg_file.name}")
-                continue
-
-            # 2. Расшифровываем
             aad = f"chat_id={chat_id}|sender={sender}|ts={ts}".encode("utf-8")
-            plaintext = aes_decrypt(group_key, nonce, ciphertext, aad=aad)
 
-            messages.append(Message(
-                chat_id=chat_id,
-                sender_fp16=sender,
-                text=plaintext.decode("utf-8"),
-                ts=ts,
-                msg_id=msg_file.stem,
-            ))
+            if chat_type == "dm":
+                pkg = {
+                    "nonce": container["nonce"], "ciphertext": container["ciphertext"],
+                    "wrapped_keys": container["wrapped_keys"]
+                }
+                data_to_check = from_base64(pkg["nonce"]) + from_base64(pkg["ciphertext"])
+                if not rsa_verify(sender_pub, data_to_check, signature):
+                    continue
+                # Вычисляем полный fingerprint из нашего приватного ключа
+                my_pub_pem = load_private_key(my_priv_pem).publickey().export_key().decode("ascii")
+                my_full_fp = fingerprint(my_pub_pem)
+
+                plaintext = hybrid_decrypt(pkg, my_full_fp, my_priv_pem, aad=aad)
+            else:
+                nonce = from_base64(container["nonce"])
+                ciphertext = from_base64(container["ciphertext"])
+                if not rsa_verify(sender_pub, nonce + ciphertext, signature):
+                    continue
+                plaintext = aes_decrypt(group_key, nonce, ciphertext, aad=aad)
+
+            messages.append(Message(chat_id, sender, plaintext.decode("utf-8"), ts, msg_file.stem))
         except Exception as e:
-            logger.error(f"Ошибка чтения сообщения {msg_file.name}: {e}")
-            continue
+            logger.error(f"Ошибка чтения {msg_file.name}: {e}")
 
     return sorted(messages, key=lambda m: m.ts)
