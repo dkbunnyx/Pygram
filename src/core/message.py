@@ -97,7 +97,6 @@ def send_message(shared_folder: Path | str, chat_id: str, sender_fp16: str, send
 
 def send_file(shared_folder: Path | str, chat_id: str, sender_fp16: str, sender_priv_pem: str,
               file_path: str | Path) -> str:
-    """Копирует файл в шару и отправляет сообщение со ссылкой на него."""
     file_path = Path(file_path)
     if not file_path.is_file():
         raise ValueError("Файл не найден")
@@ -105,14 +104,38 @@ def send_file(shared_folder: Path | str, chat_id: str, sender_fp16: str, sender_
     files_dir = chat_files_dir(shared_folder, chat_id)
     files_dir.mkdir(parents=True, exist_ok=True)
 
-    # Сохраняем оригинальное имя
     original_name = file_path.name
-    ext = file_path.suffix
-    new_filename = f"{uuid.uuid4().hex}_{original_name}"  # UUID + оригинальное имя
-    dest_path = files_dir / new_filename
-    shutil.copy2(file_path, dest_path)
+    ext = file_path.suffix.lower()
 
-    # В сообщении сохраняем и UUID, и оригинальное имя (через разделитель)
+    # Если это картинка — сжимаем
+    if ext in ('.png', '.jpg', '.jpeg'):
+        try:
+            from PIL import Image
+            import io
+
+            img = Image.open(file_path)
+            # Если картинка больше 1920px по ширине, уменьшаем
+            if img.width > 1920:
+                ratio = 1920 / img.width
+                new_size = (1920, int(img.height * ratio))
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+
+            new_filename = f"{uuid.uuid4().hex}_{original_name}"
+            dest_path = files_dir / new_filename
+            # Сохраняем как JPEG с качеством 85 (чтобы уменьшить вес)
+            img.convert('RGB').save(dest_path, "JPEG", quality=85)
+        except Exception as e:
+            logger.error(f"Ошибка сжатия картинки: {e}")
+            # Если не удалось сжать, копируем как есть
+            new_filename = f"{uuid.uuid4().hex}_{original_name}"
+            dest_path = files_dir / new_filename
+            shutil.copy2(file_path, dest_path)
+    else:
+        # Обычный файл — просто копируем
+        new_filename = f"{uuid.uuid4().hex}_{original_name}"
+        dest_path = files_dir / new_filename
+        shutil.copy2(file_path, dest_path)
+
     text = f"[FILE]{new_filename}|{original_name}[/FILE]"
     return send_message(shared_folder, chat_id, sender_fp16, sender_priv_pem, text)
 

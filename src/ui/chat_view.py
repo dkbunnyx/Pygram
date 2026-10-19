@@ -2,18 +2,54 @@
 
 from pathlib import Path
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout,
+    QWidget, QVBoxLayout, QHBoxLayout, QDialog,
     QTextBrowser, QLineEdit, QPushButton, QLabel, QFileDialog
 )
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import Qt, QUrl, QEvent
+from PySide6.QtGui import QDesktopServices, QKeySequence, QPixmap, QGuiApplication
 from loguru import logger
 import os
+import tempfile
+import shutil
+import sys
 
 from src.core.message import read_messages, send_message, send_file
 from src.core.chat_logic import get_chat_meta
 from src.storage.local_db import LocalDB
 from src.storage.shared_store import chat_files_dir
+
+
+class ImageConfirmDialog(QDialog):
+    """Диалог подтверждения отправки картинки из буфера."""
+    def __init__(self, image, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Отправить картинку?")
+        self.resize(400, 300)
+
+        layout = QVBoxLayout(self)
+
+        label = QLabel()
+        pixmap = QPixmap.fromImage(image)
+        pixmap = pixmap.scaled(380, 220, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        label.setPixmap(pixmap)
+        label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(label)
+
+        # Кнопки (Слева - Отмена, Справа - Отправить)
+        btn_layout = QHBoxLayout()
+
+        btn_cancel = QPushButton("Отмена")
+        btn_cancel.clicked.connect(self.reject)
+        btn_layout.addWidget(btn_cancel)
+
+        btn_layout.addStretch()  # Прижимаем кнопки к краям
+
+        btn_send = QPushButton("Отправить")
+        btn_send.setStyleSheet("background-color: #4a90e2; color: white; font-weight: bold;")
+        btn_send.clicked.connect(self.accept)
+        btn_layout.addWidget(btn_send)
+
+        layout.addLayout(btn_layout)
 
 
 class ChatViewWidget(QWidget):
@@ -35,7 +71,7 @@ class ChatViewWidget(QWidget):
 
         self.text_browser = QTextBrowser()
         self.text_browser.setObjectName("message_history")
-        self.text_browser.setOpenExternalLinks(False)  # Перехватываем клики
+        self.text_browser.setOpenExternalLinks(False)
         self.text_browser.setOpenLinks(False)
         self.text_browser.anchorClicked.connect(self._on_anchor_clicked)
         layout.addWidget(self.text_browser)
@@ -46,7 +82,6 @@ class ChatViewWidget(QWidget):
         input_layout = QHBoxLayout(self.input_widget)
         input_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Кнопка прикрепления файла
         self.btn_attach = QPushButton("📎")
         self.btn_attach.setFixedSize(40, 40)
         self.btn_attach.setCursor(Qt.PointingHandCursor)
@@ -56,6 +91,7 @@ class ChatViewWidget(QWidget):
         self.input_field = QLineEdit()
         self.input_field.setPlaceholderText("Введите сообщение...")
         self.input_field.returnPressed.connect(self._on_send_clicked)
+        self.input_field.installEventFilter(self)  # Перехват Ctrl+V
         input_layout.addWidget(self.input_field)
 
         self.btn_send = QPushButton("Отправить")
@@ -129,7 +165,7 @@ class ChatViewWidget(QWidget):
 
                 sender_name = "Вы" if is_me else db.get_login_by_fp16(msg.sender_fp16)
 
-                # Обработка файлов
+                # Обработка файлов и картинок
                 display_text = msg.text
                 if msg.text.startswith("[FILE]") and msg.text.endswith("[/FILE]"):
                     inner = msg.text[6:-7]
@@ -139,8 +175,24 @@ class ChatViewWidget(QWidget):
                         stored_name = display_name = inner
 
                     file_path = chat_files_dir(self.shared_folder, chat_id) / stored_name
-                    file_url = QUrl.fromLocalFile(str(file_path)).toString()
-                    display_text = f"📎 <a href='{file_url}' style='color: #89b4fa; text-decoration: none;'>📥 {display_name}</a>"
+
+                    # Проверяем, картинка ли это
+                    ext = display_name.lower().split('.')[-1]
+                    if ext in ('png', 'jpg', 'jpeg', 'gif', 'bmp'):
+                        # Для картинок делаем превью
+                        file_url = QUrl.fromLocalFile(str(file_path)).toString()
+                        # Ограничиваем размер превью через HTML (max-width: 200px)
+                        display_text = f"""
+                        <div style="text-align: center;">
+                            <a href='{file_url}'>
+                                <img src='{file_url}' style='max-width: 250px; max-height: 250px; border-radius: 5px;' />
+                            </a>
+                        </div>
+                        """
+                    else:
+                        # Для обычных файлов оставляем ссылку
+                        file_url = QUrl.fromLocalFile(str(file_path)).toString()
+                        display_text = f"📎 <a href='{file_url}' style='color: #89b4fa; text-decoration: none;'>📥 {display_name}</a>"
 
                 html += f"""
                 <div style="text-align: {align}; margin-top: 10px; margin-bottom: 10px;">
@@ -164,12 +216,34 @@ class ChatViewWidget(QWidget):
             logger.error(f"Ошибка загрузки чата {chat_id}: {e}")
             self.text_browser.setHtml(f"<b style='color: red;'>Ошибка загрузки сообщений</b><br>{e}")
 
-    def _on_anchor_clicked(self, url: QUrl):
-        """Скачивает файл из шары в локальную папку (рядом с .exe) и открывает."""
-        import shutil
-        import sys
-        from pathlib import Path
+    def eventFilter(self, obj, event):
+        if obj is self.input_field and event.type() == QEvent.KeyPress:
+            if event.matches(QKeySequence.Paste):
+                clipboard = QGuiApplication.clipboard()
+                if clipboard.mimeData().hasImage():
+                    image = clipboard.image()
+                    if not image.isNull():
+                        dialog = ImageConfirmDialog(image, self)
+                        if dialog.exec() == QDialog.Accepted:
+                            temp_dir = Path(tempfile.gettempdir())
+                            temp_path = temp_dir / "pygram_clipboard.png"
+                            image.save(str(temp_path), "PNG")
 
+                            try:
+                                send_file(
+                                    self.shared_folder, self.current_chat_id,
+                                    self.user.fp16, self.user.priv_pem, temp_path
+                                )
+                                self.load_chat(self.current_chat_id)
+                            except Exception as e:
+                                logger.error(f"Ошибка отправки скриншота: {e}")
+
+                            temp_path.unlink(missing_ok=True)
+                        return True
+        return super().eventFilter(obj, event)
+
+    def _on_anchor_clicked(self, url: QUrl):
+        """Скачивает файл и открывает его."""
         path_str = url.toLocalFile()
         if not path_str:
             return
@@ -178,12 +252,9 @@ class ChatViewWidget(QWidget):
         if not src_path.exists():
             return
 
-        # Определяем папку для скачивания
         if getattr(sys, "frozen", False):
-            # Рядом с .exe
             base_dir = Path(sys.executable).parent
         else:
-            # В dev-режиме (папка проекта)
             base_dir = Path(__file__).resolve().parent.parent.parent
 
         download_dir = base_dir / "Downloads"
@@ -191,13 +262,10 @@ class ChatViewWidget(QWidget):
         try:
             download_dir.mkdir(parents=True, exist_ok=True)
         except PermissionError:
-            # Если нет прав (например, Program Files), кидаем в Загрузки
             download_dir = Path.home() / "Downloads" / "Pygram"
             download_dir.mkdir(parents=True, exist_ok=True)
 
-        # Оригинальное имя (из формата [FILE]stored|original[/FILE])
-        # Но у нас есть только src_path.name (хранимое имя), нужно вытащить оригинал
-        # Проще: если в имени есть "_", берем всё после первого "_"
+        # Оригинальное имя из UUID_имя
         stored_name = src_path.name
         if "_" in stored_name:
             display_name = stored_name.split("_", 1)[1]
@@ -207,11 +275,9 @@ class ChatViewWidget(QWidget):
         dest_path = download_dir / display_name
 
         try:
-            # Если файла еще нет, копируем
             if not dest_path.exists():
                 shutil.copy2(src_path, dest_path)
 
-            # Открываем скачанный файл
             os.startfile(str(dest_path))
         except Exception as e:
             logger.error(f"Ошибка скачивания файла: {e}")
