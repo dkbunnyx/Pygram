@@ -60,14 +60,12 @@ class MainWindow(QMainWindow):
             self.btn_admin.clicked.connect(self._toggle_admin_mode)
             sidebar_layout.addWidget(self.btn_admin)
 
-            # --- КОРОНА ---
             self.btn_manage_admins = QPushButton("👑")
             self.btn_manage_admins.setFixedSize(45, 45)
             self.btn_manage_admins.setCursor(Qt.PointingHandCursor)
             self.btn_manage_admins.setToolTip("Управление администраторами")
             self.btn_manage_admins.clicked.connect(self._open_admins_panel)
             sidebar_layout.addWidget(self.btn_manage_admins)
-            # --------------
 
         sidebar_layout.addStretch()
 
@@ -123,7 +121,6 @@ class MainWindow(QMainWindow):
             self.btn_admin.setStyleSheet("")
 
     def _open_admins_panel(self):
-        """Открывает панель управления админами."""
         from src.core.admin import is_admin, is_super, make_admin, remove_admin
         from src.core.chat_logic import get_all_users_fp16
         from src.storage.local_db import LocalDB
@@ -204,22 +201,57 @@ class MainWindow(QMainWindow):
     def _open_settings(self):
         self.settings_window = SettingsView(self.user, self.account_manager)
         self.settings_window.settings_changed.connect(self._on_settings_saved)
-        self.settings_window.logout_requested.connect(self._on_logout_requested)
+        self.settings_window.logout_requested.connect(self._on_logout_current)
+        self.settings_window.switch_requested.connect(self._on_switch_account)
+        self.settings_window.add_account_requested.connect(self._on_add_account)
         self.settings_window.show()
 
-    def _on_logout_requested(self):
+    def _on_switch_account(self, fp16: str):
+        self.account_manager.switch_to(fp16)
         current = self.account_manager.get_current()
         if current:
-            self.user = current
-            self.setWindowTitle(f"Pygram - {current.login} ({current.role})")
-            self.chat_list.user_fp16 = current.fp16
-            self.chat_list.user_login = current.login
-            self.chat_view.user = current
-            self.chat_list.refresh_chats()
-            self.chat_view.text_browser.clear()
-            self.chat_view.input_widget.setVisible(False)
+            self._reload_for_user(current)
+
+    def _on_logout_current(self):
+        self.account_manager.remove_account(self.user.fp16)
+        current = self.account_manager.get_current()
+        if current:
+            self._reload_for_user(current)
         else:
             self.close()
+
+    def _on_add_account(self):
+        from src.ui.login_view import LoginView
+        self.login_window = LoginView()
+        self.login_window.logged_in.connect(self._on_new_account_logged_in)
+        self.login_window.show()
+
+    def _on_new_account_logged_in(self, new_user):
+        self.login_window.close()
+        try:
+            self.account_manager.add_account(new_user)
+            self._reload_for_user(new_user)
+        except ValueError as e:
+            QMessageBox.warning(self, "Ошибка", str(e))
+
+    def _reload_for_user(self, user):
+        self.user = user
+        self.setWindowTitle(f"Pygram - {user.login} ({user.role})")
+
+        self.chat_list.user_fp16 = user.fp16
+        self.chat_list.user_login = user.login
+        self.chat_list.refresh_chats()
+
+        self.chat_view.user = user
+        self.chat_view.text_browser.clear()
+        self.chat_view.input_widget.setVisible(False)
+
+        # Обновляем кнопки в сайдбаре (если роль изменилась)
+        self.btn_settings.setVisible(True)
+        if hasattr(self, 'btn_admin'):
+            self.btn_admin.setVisible(user.is_admin)
+        if hasattr(self, 'btn_manage_admins'):
+            self.btn_manage_admins.setVisible(user.is_admin)
 
     def _on_settings_saved(self):
         from src.storage.local_db import LocalDB

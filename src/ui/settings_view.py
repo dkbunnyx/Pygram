@@ -2,7 +2,7 @@
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QTabWidget, QPushButton, QComboBox, QLineEdit, QSpinBox, QColorDialog, QListWidget, QMessageBox
+    QTabWidget, QPushButton, QComboBox, QLineEdit, QSpinBox, QColorDialog, QListWidget, QMessageBox, QListWidgetItem
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
@@ -12,6 +12,8 @@ from src.storage.local_db import LocalDB
 class SettingsView(QWidget):
     settings_changed = Signal()
     logout_requested = Signal()
+    switch_requested = Signal(str)
+    add_account_requested = Signal()
 
     def __init__(self, user, account_manager, parent=None):
         super().__init__(parent)
@@ -31,15 +33,13 @@ class SettingsView(QWidget):
         self.tab_personal = QWidget()
         p_layout = QVBoxLayout(self.tab_personal)
 
-        # Тема
         p_layout.addWidget(QLabel("<b>Тема оформления</b>"))
         self.combo_theme = QComboBox()
         self.combo_theme.addItems(["Основная (темная)", "Пользовательская"])
-        self.combo_theme.currentTextChanged.connect(self._on_theme_changed)  # Связываем
+        self.combo_theme.currentTextChanged.connect(self._on_theme_changed)
         p_layout.addWidget(self.combo_theme)
         p_layout.addSpacing(10)
 
-        # --- КОНТЕЙНЕР ДЛЯ ЦВЕТОВ (скрыт по умолчанию) ---
         self.colors_widget = QWidget()
         c_layout = QVBoxLayout(self.colors_widget)
         c_layout.setContentsMargins(0, 0, 0, 0)
@@ -62,12 +62,10 @@ class SettingsView(QWidget):
         self.btn_other.clicked.connect(lambda: self._pick_color("color_other_msg", self.btn_other))
         c_layout.addWidget(self.btn_other)
 
-        self.colors_widget.setVisible(False)  # Скрываем изначально
+        self.colors_widget.setVisible(False)
         p_layout.addWidget(self.colors_widget)
-
         p_layout.addSpacing(10)
 
-        # Шрифты
         p_layout.addWidget(QLabel("<b>Настройки шрифта</b>"))
         font_row = QHBoxLayout()
         font_row.addWidget(QLabel("Шрифт:"))
@@ -82,7 +80,6 @@ class SettingsView(QWidget):
         p_layout.addLayout(font_row)
         p_layout.addSpacing(10)
 
-        # Кнопки
         p_layout.addWidget(QLabel("<b>Оформление</b>"))
         p_layout.addWidget(QLabel("Текст кнопки 'Отправить':"))
         self.input_btn_text = QLineEdit()
@@ -101,6 +98,7 @@ class SettingsView(QWidget):
         a_layout.addWidget(QLabel("<b>Активные аккаунты (до 3)</b>"))
 
         self.accounts_list = QListWidget()
+        self.accounts_list.itemClicked.connect(self._on_account_clicked)
         a_layout.addWidget(self.accounts_list)
 
         btn_add = QPushButton("+ Войти в другой аккаунт")
@@ -122,7 +120,6 @@ class SettingsView(QWidget):
         layout.addWidget(btn_save)
 
     def _on_theme_changed(self, text):
-        """Показывает/скрывает блок с цветами."""
         is_custom = "Пользовательская" in text
         self.colors_widget.setVisible(is_custom)
 
@@ -141,13 +138,14 @@ class SettingsView(QWidget):
         self._update_btn_color(self.btn_my, db.get_setting("color_my_msg", "#4a90e2"))
         self._update_btn_color(self.btn_other, db.get_setting("color_other_msg", "#e2a04a"))
 
-        # Принудительно вызываем проверку видимости (на случай, если тема "custom")
         self._on_theme_changed(self.combo_theme.currentText())
 
         self.accounts_list.clear()
         for acc in self.account_manager.accounts:
             prefix = "👉 " if acc.fp16 == self.user.fp16 else "    "
-            self.accounts_list.addItem(f"{prefix}{acc.login}")
+            item = QListWidgetItem(f"{prefix}{acc.login}")
+            item.setData(Qt.UserRole, acc.fp16)
+            self.accounts_list.addItem(item)
 
     def _update_btn_color(self, button, color_hex):
         button.setStyleSheet(f"background-color: {color_hex}; color: white; padding: 5px;")
@@ -175,11 +173,17 @@ class SettingsView(QWidget):
         self.close()
 
     def _on_add_account(self):
-        QMessageBox.information(self, "Инфо", "Для добавления аккаунта нужно перезапустить окно входа (в разработке)")
+        self.add_account_requested.emit()
+        self.close()
 
     def _on_logout(self):
         reply = QMessageBox.question(self, "Выход", f"Выйти из аккаунта {self.user.login}?")
         if reply == QMessageBox.Yes:
-            self.account_manager.remove_account(self.user.fp16)
             self.logout_requested.emit()
+            self.close()
+
+    def _on_account_clicked(self, item):
+        fp16 = item.data(Qt.UserRole)
+        if fp16 and fp16 != self.user.fp16:
+            self.switch_requested.emit(fp16)
             self.close()
