@@ -1,6 +1,7 @@
 """Тесты для src/constants.py."""
 
 import sys
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -35,10 +36,13 @@ class TestGetAppDir:
         """frozen без APPDATA (Linux/macOS): fallback на ~/.config/Pygram."""
         fake_exe = tmp_path / "pygram.exe"
         fake_exe.touch()
+
+        # Убираем APPDATA, но оставляем HOME, чтобы Path.home() работал
         monkeypatch.delenv("APPDATA", raising=False)
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
 
         with patch.object(sys, "frozen", True, create=True), \
-             patch.object(sys, "executable", str(fake_exe)):
+                patch.object(sys, "executable", str(fake_exe)):
             d = get_app_dir()
             assert d == tmp_path / ".config" / APP_NAME

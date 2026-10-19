@@ -1,21 +1,4 @@
-"""Управление админами Pygram.
-
-Список админов хранится в .admins/list.json в шаре.
-Каждая запись содержит fp16 (не логин!) и подпись RSA-PSS того,
-кто назначил админа.
-
-Формат:
-    {
-      "admins": [
-        {"fp16": "a1b2...", "added_at": 1729..., "added_by": "system",
-         "signature": "base64"},
-        {"fp16": "c3d4...", "added_at": 1729..., "added_by": "a1b2...",
-         "signature": "base64"}
-      ]
-    }
-
-Подпись: rsa_sign(by_priv, f"{fp16}|{added_at}|{added_by}".encode())
-"""
+"""Управление админами Pygram."""
 
 from __future__ import annotations
 
@@ -35,51 +18,37 @@ from src.storage.shared_store import (
 
 ADMINS_FILE = "list.json"
 
-
-# ============================================================================
-# Пути
-# ============================================================================
-
 def admins_path(shared_folder: Path | str) -> Path:
-    """Путь к .admins/list.json."""
     return safe_join(shared_folder, DIR_ADMINS, ADMINS_FILE)
 
-
-# ============================================================================
-# Чтение / запись
-# ============================================================================
-
 def _load_list(shared_folder: Path | str) -> dict:
-    """Читает list.json или возвращает {"admins": []}, если его нет."""
     path = admins_path(shared_folder)
     if not path.is_file():
         return {"admins": []}
     return read_json(path)
 
-
 def _save_list(shared_folder: Path | str, data: dict) -> None:
-    """Атомарно пишет list.json."""
     write_json_atomic(admins_path(shared_folder), data)
 
-
-# ============================================================================
-# Публичный API
-# ============================================================================
-
 def load_admins(shared_folder: Path | str) -> list[dict]:
-    """Возвращает список записей админов (fp16, added_at, added_by, signature)."""
     return _load_list(shared_folder)["admins"]
 
-
 def has_any_admin(shared_folder: Path | str) -> bool:
-    """Есть ли хоть один админ?"""
     return len(load_admins(shared_folder)) > 0
 
-
 def is_admin(shared_folder: Path | str, fp16: str) -> bool:
-    """Проверяет, админ ли пользователь с данным fp16."""
     return any(a["fp16"] == fp16 for a in load_admins(shared_folder))
 
+def is_super(shared_folder: Path | str, fp16: str) -> bool:
+    """Проверяет, является ли пользователь супер-админом."""
+    return any(a["fp16"] == fp16 and a.get("is_super", False) for a in load_admins(shared_folder))
+
+def get_super(shared_folder: Path | str) -> dict | None:
+    """Возвращает запись супер-админа."""
+    for a in load_admins(shared_folder):
+        if a.get("is_super", False):
+            return a
+    return None
 
 def make_admin(
         shared_folder: Path | str,
@@ -87,28 +56,21 @@ def make_admin(
         by: str,
         by_priv: str | None = None,
 ) -> None:
-    """Назначает админа.
-
-    Args:
-        shared_folder: Корень шары.
-        fp16: Fingerprint нового админа.
-        by: fp16 того, кто назначает ("system" для первого).
-        by_priv: Приватный ключ того, кто назначает.
-                 None только для by="system" (первый админ).
-
-    Raises:
-        ValueError: если уже админ или подпись невозможна.
-    """
+    """Назначает админа. Только супер-админ может это делать."""
     ensure_shared_structure(shared_folder)
 
     if is_admin(shared_folder, fp16):
         raise ValueError(f"{fp16} уже админ")
 
+    if by != "system" and not is_super(shared_folder, by):
+        raise ValueError("Только супер-админ может назначать других админов")
+
     added_at = int(time.time() * 1000)
     payload = f"{fp16}|{added_at}|{by}".encode("utf-8")
 
+    is_super_new = (by == "system")
+
     if by == "system":
-        # Первый админ — подпись не нужна (или пустая)
         signature_b64 = ""
     else:
         if by_priv is None:
@@ -121,33 +83,33 @@ def make_admin(
         "added_at": added_at,
         "added_by": by,
         "signature": signature_b64,
+        "is_super": is_super_new,
     })
     _save_list(shared_folder, data)
-    logger.info(f"Админ назначен: {fp16} (by={by})")
+    logger.info(f"Админ назначен: {fp16} (by={by}, super={is_super_new})")
 
 
 def remove_admin(
         shared_folder: Path | str,
         fp16: str,
         by: str,
+        by_priv: str | None = None,
 ) -> None:
-    """Снимает админку.
-
-    Args:
-        shared_folder: Корень шары.
-        fp16: Кого снять.
-        by: fp16 того, кто снимает.
-
-    Raises:
-        ValueError: если не админ или попытка снять последнего.
-    """
+    """Снимает админку. Только супер-админ может это делать."""
     admins = load_admins(shared_folder)
     target = [a for a in admins if a["fp16"] == fp16]
+
     if not target:
         raise ValueError(f"{fp16} не админ")
 
-    if len(admins) <= 1:
-        raise ValueError("Нельзя снять последнего админа")
+    if target[0].get("is_super", False):
+        raise ValueError("Нельзя снять супер-админа")
+
+    if by != "system" and not is_super(shared_folder, by):
+        raise ValueError("Только супер-админ может снимать админов")
+
+    if by != "system" and by_priv is None:
+        raise ValueError("by_priv обязателен для by != 'system'")
 
     data = _load_list(shared_folder)
     data["admins"] = [a for a in data["admins"] if a["fp16"] != fp16]
@@ -155,25 +117,11 @@ def remove_admin(
     logger.info(f"Админ снят: {fp16} (by={by})")
 
 
-def verify_signature(
-        entry: dict,
-        by_pub_pem: str,
-) -> bool:
-    """Проверяет подпись записи.
-
-    Args:
-        entry: Запись из list.json.
-        by_pub_pem: Публичный ключ того, кто назначал.
-
-    Returns:
-        True, если подпись валидна (или added_by == "system").
-    """
+def verify_signature(entry: dict, by_pub_pem: str) -> bool:
     if entry["added_by"] == "system":
         return True
-
     if not entry.get("signature"):
         return False
-
     payload = f"{entry['fp16']}|{entry['added_at']}|{entry['added_by']}".encode("utf-8")
     try:
         sig = from_base64(entry["signature"])
