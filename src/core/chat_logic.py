@@ -49,7 +49,7 @@ def create_dm_chat(shared_folder: Path | str, login1: str, login2: str) -> str:
     fpa, fpb = _sorted_pair(fp1, fp2)
     chat_id = f"dm_{fpa}__{fpb}"
 
-    if (shared_folder / ".meta" / f"{chat_id}.json").is_file():
+    if (Path(shared_folder) / ".meta" / f"{chat_id}.json").is_file():
         return chat_id
 
     ensure_shared_structure(shared_folder)
@@ -112,7 +112,7 @@ def create_favorites(shared_folder: Path | str, login: str) -> str:
     if not fp16: raise ValueError("Пользователь не найден")
 
     chat_id = f"fav_{fp16}"
-    if (shared_folder / ".meta" / f"{chat_id}.json").is_file(): return chat_id
+    if (Path(shared_folder) / ".meta" / f"{chat_id}.json").is_file(): return chat_id
 
     save_chat_meta(shared_folder, chat_id, {"chat_id": chat_id, "type": "favorites", "created_at": int(time.time() * 1000)})
     ensure_chat_folders(shared_folder, chat_id)
@@ -127,7 +127,7 @@ def create_favorites(shared_folder: Path | str, login: str) -> str:
 
 def create_admin_chat(shared_folder: Path | str) -> str:
     chat_id = "admin_chat"
-    if (shared_folder / ".meta" / f"{chat_id}.json").is_file(): return chat_id
+    if (Path(shared_folder) / ".meta" / f"{chat_id}.json").is_file(): return chat_id
 
     save_chat_meta(shared_folder, chat_id, {"chat_id": chat_id, "type": "admin_chat", "created_at": int(time.time() * 1000)})
     ensure_chat_folders(shared_folder, chat_id)
@@ -169,7 +169,7 @@ def is_chat_visible(shared_folder: Path | str, chat_id: str, fp16: str) -> bool:
 
 
 def list_user_chats(shared_folder: Path | str, fp16: str) -> list[dict]:
-    meta_dir = shared_folder / ".meta"
+    meta_dir = Path(shared_folder) / ".meta"  # <--- ДОБАВИЛИ Path()
     if not meta_dir.is_dir(): return []
 
     result = []
