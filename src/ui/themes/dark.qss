@@ -1,0 +1,73 @@
+/* src/ui/themes/dark.qss */
+
+/* Общий фон окна и базовый цвет текста */
+QWidget {
+    background-color: #1a1a2e; /* Чуть темнее, чтобы кнопки выделялись */
+    color: #cdd6f4;            /* Светло-серый/голубоватый текст (как в твоем коде) */
+    font-family: "Segoe UI", Arial, sans-serif;
+    font-size: 14px;
+}
+
+/* Поля ввода (Логин, Пароль) */
+QLineEdit {
+    background-color: #252538; /* Твой цвет темной темы */
+    border: 1px solid #313148;
+    border-radius: 8px;
+    padding: 10px;
+    color: #cdd6f4;
+    font-size: 14px;
+}
+
+/* Подсветка поля при клике на него */
+QLineEdit:focus {
+    border: 1px solid #89b4fa; /* Голубая обводка (стиль Catppuccin) */
+}
+
+/* Обычные кнопки (Войти) */
+QPushButton {
+    background-color: #252538; /* Твой цвет */
+    border: 1px solid #313148;
+    border-radius: 8px;
+    color: #cdd6f4;
+    padding: 10px;
+    font-weight: bold;
+    font-size: 14px;
+}
+
+/* Наведение курсора на кнопку */
+QPushButton:hover {
+    background-color: #313148; /* Чуть светлее */
+    border: 1px solid #89b4fa;
+}
+
+/* Нажатие на кнопку */
+QPushButton:pressed {
+    background-color: #1a1a2e;
+}
+
+/* Специальная кнопка (Создать аккаунт) - без фона */
+QPushButton#btn_register {
+    background-color: transparent;
+    border: none;
+    color: #89b4fa; /* Голубой акцент */
+    text-decoration: underline;
+    font-weight: normal;
+}
+
+QPushButton#btn_register:hover {
+    color: #b4befe;
+}
+
+/* Текст ошибок */
+QLabel#error_label {
+    color: #f38ba8; /* Красный/розовый (стиль Catppuccin) */
+    font-size: 12px;
+}
+
+/* Заголовок "Pygram" */
+QLabel#title_label {
+    font-size: 32px;
+    font-weight: bold;
+    color: #cdd6f4;
+    padding-bottom: 20px;
+}
