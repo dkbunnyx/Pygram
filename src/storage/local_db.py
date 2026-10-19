@@ -1,12 +1,9 @@
-"""Локальная база данных Pygram (SQLite).
-
-Хранит кэш расшифрованных сообщений, черновики и локальные настройки.
-База лежит в %USERPROFILE%\\.pygram\\pygram.db
-"""
+"""Локальная база данных Pygram (SQLite)."""
 
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 
 from loguru import logger
@@ -22,15 +19,26 @@ class LocalDB:
             db_path = get_local_dir() / "pygram.db"
 
         self.path = db_path
-        self.conn = sqlite3.connect(str(self.path), check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row  # Доступ к колонкам по имени
+        # Каждый поток получает свое соединение
+        self._local = threading.local()
+
+        # Инициализируем схему в главном потоке
+        conn = self._get_conn()
         self._init_schema()
+        # Соединение оставляем открытым! Не закрываем его.
+    def _get_conn(self) -> sqlite3.Connection:
+        """Возвращает соединение для текущего потока."""
+        if not hasattr(self._local, "conn"):
+            conn = sqlite3.connect(str(self.path), check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")  # Важно для многопоточности
+            self._local.conn = conn
+        return self._local.conn
 
     def _init_schema(self):
-        """Создаёт таблицы, если их нет."""
-        cursor = self.conn.cursor()
+        conn = self._get_conn()
+        cursor = conn.cursor()
 
-        # 1. Таблица сообщений (кэш)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 msg_id TEXT PRIMARY KEY,
@@ -43,72 +51,64 @@ class LocalDB:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_chat_ts ON messages(chat_id, ts)")
 
-        # 2. Таблица черновиков
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS drafts (
                 chat_id TEXT PRIMARY KEY,
                 text TEXT NOT NULL
             )
         """)
-
-        # 3. Локальные настройки (ключ-значение)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             )
         """)
-
         cursor.execute(f"PRAGMA user_version = {DB_VERSION}")
-        self.conn.commit()
+        conn.commit()
         logger.info(f"БД инициализирована: {self.path}")
 
     def close(self):
-        self.conn.close()
+        """Закрывает соединение текущего потока."""
+        if hasattr(self._local, "conn") and self._local.conn:
+            self._local.conn.close()
+            self._local.conn = None
 
     # ========================================================================
     # Сообщения
     # ========================================================================
 
     def save_message(self, msg_id: str, chat_id: str, sender_fp16: str, text: str, ts: int):
-        """Сохраняет расшифрованное сообщение в кэш."""
-        self.conn.execute(
+        conn = self._get_conn()
+        conn.execute(
             "INSERT OR REPLACE INTO messages (msg_id, chat_id, sender_fp16, text, ts) VALUES (?, ?, ?, ?, ?)",
             (msg_id, chat_id, sender_fp16, text, ts)
         )
-        self.conn.commit()
+        conn.commit()
 
     def get_messages(self, chat_id: str) -> list[dict]:
-        """Возвращает все сообщения чата, отсортированные по времени."""
-        cursor = self.conn.execute(
-            "SELECT * FROM messages WHERE chat_id = ? ORDER BY ts ASC",
-            (chat_id,)
-        )
+        conn = self._get_conn()
+        cursor = conn.execute("SELECT * FROM messages WHERE chat_id = ? ORDER BY ts ASC", (chat_id,))
         return [dict(row) for row in cursor.fetchall()]
 
     def mark_read(self, chat_id: str):
-        """Помечает все сообщения чата как прочитанные."""
-        self.conn.execute("UPDATE messages SET is_read = 1 WHERE chat_id = ?", (chat_id,))
-        self.conn.commit()
+        conn = self._get_conn()
+        conn.execute("UPDATE messages SET is_read = 1 WHERE chat_id = ?", (chat_id,))
+        conn.commit()
 
     # ========================================================================
     # Черновики
     # ========================================================================
 
     def save_draft(self, chat_id: str, text: str):
-        """Сохраняет черновик. Если text пустой — удаляет черновик."""
+        conn = self._get_conn()
         if not text.strip():
-            self.conn.execute("DELETE FROM drafts WHERE chat_id = ?", (chat_id,))
+            conn.execute("DELETE FROM drafts WHERE chat_id = ?", (chat_id,))
         else:
-            self.conn.execute(
-                "INSERT OR REPLACE INTO drafts (chat_id, text) VALUES (?, ?)",
-                (chat_id, text)
-            )
-        self.conn.commit()
+            conn.execute("INSERT OR REPLACE INTO drafts (chat_id, text) VALUES (?, ?)", (chat_id, text))
+        conn.commit()
 
     def get_draft(self, chat_id: str) -> str:
-        """Возвращает текст черновика или пустую строку."""
-        cursor = self.conn.execute("SELECT text FROM drafts WHERE chat_id = ?", (chat_id,))
+        cursor = self._get_conn().execute("SELECT text FROM drafts WHERE chat_id = ?", (chat_id,))
         row = cursor.fetchone()
         return row["text"] if row else ""
 
@@ -117,13 +117,11 @@ class LocalDB:
     # ========================================================================
 
     def set_setting(self, key: str, value: str):
-        self.conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-            (key, value)
-        )
-        self.conn.commit()
+        conn = self._get_conn()
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+        conn.commit()
 
     def get_setting(self, key: str, default: str = "") -> str:
-        cursor = self.conn.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        cursor = self._get_conn().execute("SELECT value FROM settings WHERE key = ?", (key,))
         row = cursor.fetchone()
         return row["value"] if row else default
