@@ -638,3 +638,52 @@ def hybrid_decrypt(
     aes_key = unwrap_key(wrapped_keys, my_fingerprint, priv_pem)
     plaintext = aes_decrypt(aes_key, nonce, ciphertext, aad)
     return plaintext
+# ============================================================================
+# Argon2id для вывода ключей (derive_key)
+# ============================================================================
+
+# Параметры OWASP 2023 для Argon2id
+ARGON2_TIME_COST = 3
+ARGON2_MEMORY_COST = 65536   # 64 МБ
+ARGON2_PARALLELISM = 4
+ARGON2_KEY_SIZE = 32
+ARGON2_SALT_SIZE = 16
+
+
+def derive_key_argon2(password: str, salt: bytes) -> bytes:
+    """Выводит 32-байтовый ключ из пароля через Argon2id.
+
+    Медленно для GPU/ASIC-брутфорса (требует 64 МБ памяти на попытку).
+    Используется для шифрования identity-файла (.identity_<fp>.enc).
+
+    Args:
+        password: Пароль пользователя.
+        salt: Соль (не менее 8 байт; рекомендуется 16).
+
+    Returns:
+        32-байтовый ключ для AES-256.
+
+    Raises:
+        TypeError: если типы неверные.
+        ValueError: если пароль пустой или соль короткая.
+    """
+    if not isinstance(password, str):
+        raise TypeError("password должен быть строкой")
+    if not isinstance(salt, (bytes, bytearray)):
+        raise TypeError("salt должен быть bytes")
+    if not password:
+        raise ValueError("Пароль не может быть пустым")
+    if len(salt) < 8:
+        raise ValueError("Соль должна быть не короче 8 байт")
+
+    from argon2.low_level import Type, hash_secret_raw
+
+    return hash_secret_raw(
+        secret=password.encode("utf-8"),
+        salt=bytes(salt),
+        time_cost=ARGON2_TIME_COST,
+        memory_cost=ARGON2_MEMORY_COST,
+        parallelism=ARGON2_PARALLELISM,
+        hash_len=ARGON2_KEY_SIZE,
+        type=Type.ID,
+    )
