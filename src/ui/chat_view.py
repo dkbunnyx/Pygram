@@ -1,6 +1,7 @@
 """Виджет окна чата Pygram."""
 
 from pathlib import Path
+import json
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QDialog,
     QTextBrowser, QLineEdit, QPushButton, QLabel, QFileDialog
@@ -15,8 +16,9 @@ import sys
 
 from src.core.message import read_messages, send_message, send_file
 from src.core.chat_logic import get_chat_meta
+from src.core.crypto import unwrap_key, aes_decrypt, from_base64
 from src.storage.local_db import LocalDB
-from src.storage.shared_store import chat_files_dir
+from src.storage.shared_store import chat_files_dir, load_chat_keys, load_chat_meta_enc
 
 
 class ImageConfirmDialog(QDialog):
@@ -35,14 +37,13 @@ class ImageConfirmDialog(QDialog):
         label.setAlignment(Qt.AlignCenter)
         layout.addWidget(label)
 
-        # Кнопки (Слева - Отмена, Справа - Отправить)
         btn_layout = QHBoxLayout()
 
         btn_cancel = QPushButton("Отмена")
         btn_cancel.clicked.connect(self.reject)
         btn_layout.addWidget(btn_cancel)
 
-        btn_layout.addStretch()  # Прижимаем кнопки к краям
+        btn_layout.addStretch()
 
         btn_send = QPushButton("Отправить")
         btn_send.setStyleSheet("background-color: #4a90e2; color: white; font-weight: bold;")
@@ -91,7 +92,7 @@ class ChatViewWidget(QWidget):
         self.input_field = QLineEdit()
         self.input_field.setPlaceholderText("Введите сообщение...")
         self.input_field.returnPressed.connect(self._on_send_clicked)
-        self.input_field.installEventFilter(self)  # Перехват Ctrl+V
+        self.input_field.installEventFilter(self)
         input_layout.addWidget(self.input_field)
 
         self.btn_send = QPushButton("Отправить")
@@ -113,10 +114,39 @@ class ChatViewWidget(QWidget):
             meta = get_chat_meta(self.shared_folder, chat_id)
             chat_type = meta["type"]
 
+            db = LocalDB()
+
+            # --- ОПРЕДЕЛЯЕМ ЗАГОЛОВОК ---
             if chat_type == "dm":
-                title = "👤 Личный чат"
+                parts = chat_id.replace("dm_", "").split("__")
+                if len(parts) == 2:
+                    fp1, fp2 = parts
+                    other_fp = fp1 if fp2 == self.user.fp16 else fp2
+                    other_login = db.get_login_by_fp16(other_fp)
+                    title = f"👤 {other_login}"
+                else:
+                    title = "👤 Личный чат"
+
             elif chat_type == "group":
-                title = f"👥 Группа {chat_id[4:12]}"
+                group_name = f"Группа {chat_id[4:12]}"
+                try:
+                    keys = load_chat_keys(self.shared_folder, chat_id)
+                    wrapped = keys.get("wrapped", {})
+                    if self.user.fp16 in wrapped:
+                        group_key = unwrap_key(wrapped, self.user.fp16, self.user.priv_pem)
+                        enc = load_chat_meta_enc(self.shared_folder, chat_id)
+                        data = json.loads(enc.decode("utf-8"))
+
+                        if "nonce" in data and "ciphertext" in data:
+                            aad = f"chat_id={chat_id}|meta".encode("utf-8")
+                            decrypted = aes_decrypt(group_key, from_base64(data["nonce"]), from_base64(data["ciphertext"]), aad=aad)
+                            meta_group = json.loads(decrypted.decode("utf-8"))
+                            group_name = meta_group.get("name", group_name)
+                except Exception as e:
+                    logger.error(f"Не удалось расшифровать имя группы в chat_view: {e}")
+
+                title = f"👥 {group_name}"
+
             elif chat_type == "favorites":
                 title = "⭐ Избранное"
             elif chat_type == "admin_chat":
@@ -135,7 +165,6 @@ class ChatViewWidget(QWidget):
                 self.text_browser.setHtml("<i>Нет сообщений. Напишите первым!</i>")
                 return
 
-            db = LocalDB()
             theme = db.get_setting("theme", "base")
 
             if theme == "custom":
@@ -165,7 +194,7 @@ class ChatViewWidget(QWidget):
 
                 sender_name = "Вы" if is_me else db.get_login_by_fp16(msg.sender_fp16)
 
-                # Обработка файлов и картинок
+                # Обработка файлов
                 display_text = msg.text
                 if msg.text.startswith("[FILE]") and msg.text.endswith("[/FILE]"):
                     inner = msg.text[6:-7]
@@ -175,13 +204,10 @@ class ChatViewWidget(QWidget):
                         stored_name = display_name = inner
 
                     file_path = chat_files_dir(self.shared_folder, chat_id) / stored_name
-
-                    # Проверяем, картинка ли это
                     ext = display_name.lower().split('.')[-1]
+
                     if ext in ('png', 'jpg', 'jpeg', 'gif', 'bmp'):
-                        # Для картинок делаем превью
                         file_url = QUrl.fromLocalFile(str(file_path)).toString()
-                        # Ограничиваем размер превью через HTML (max-width: 200px)
                         display_text = f"""
                         <div style="text-align: center;">
                             <a href='{file_url}'>
@@ -190,7 +216,6 @@ class ChatViewWidget(QWidget):
                         </div>
                         """
                     else:
-                        # Для обычных файлов оставляем ссылку
                         file_url = QUrl.fromLocalFile(str(file_path)).toString()
                         display_text = f"📎 <a href='{file_url}' style='color: #89b4fa; text-decoration: none;'>📥 {display_name}</a>"
 
@@ -265,7 +290,6 @@ class ChatViewWidget(QWidget):
             download_dir = Path.home() / "Downloads" / "Pygram"
             download_dir.mkdir(parents=True, exist_ok=True)
 
-        # Оригинальное имя из UUID_имя
         stored_name = src_path.name
         if "_" in stored_name:
             display_name = stored_name.split("_", 1)[1]
