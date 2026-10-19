@@ -41,19 +41,46 @@ def main():
         )
         sys.exit(1)
 
-    # 5. Запуск UI (остается без изменений)
+    # 5. Запуск UI (с проверкой сессий)
     app_state = {"login_window": None, "main_window": None}
 
     def on_logged_in(user):
-        app_state["login_window"].close()
+        # Закрываем и окно логина, и окно сессии, если они есть
+        if app_state["login_window"]:
+            app_state["login_window"].close()
+
         main_win = MainWindow(user)
         main_win.show()
         app_state["main_window"] = main_win
 
-    login_win = LoginView()
-    login_win.logged_in.connect(on_logged_in)
-    login_win.show()
-    app_state["login_window"] = login_win
+    # Проверяем, есть ли сохраненные сессии
+    from src.core.user import list_saved_sessions
+    from src.ui.session_view import SessionView
+
+    sessions = list_saved_sessions()
+
+    if sessions:
+        # Берем последнюю сессию (самую свежую)
+        last_session = sessions[-1]
+        window = SessionView(last_session, config.shared_folder)
+        window.logged_in.connect(on_logged_in)
+
+        # Если нажали "Другой аккаунт" — показываем обычный LoginView
+        def show_login():
+            window.close()
+            login_win = LoginView()
+            login_win.logged_in.connect(on_logged_in)
+            login_win.show()
+            app_state["login_window"] = login_win
+
+        window.switch_account.connect(show_login)
+    else:
+        # Сессий нет — показываем обычный вход
+        window = LoginView()
+        window.logged_in.connect(on_logged_in)
+
+    window.show()
+    app_state["login_window"] = window
 
     sys.exit(app.exec())
 

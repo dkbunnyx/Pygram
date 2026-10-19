@@ -71,3 +71,14 @@ QLabel#title_label {
     color: #cdd6f4;
     padding-bottom: 20px;
 }
+
+#btn_register {
+    background: transparent;
+    color: #4a90e2;
+    text-decoration: underline;
+    border: none;
+    font-size: 12px;
+}
+#btn_register:hover {
+    color: #6ab0ff;
+}
