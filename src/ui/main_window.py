@@ -154,15 +154,24 @@ class MainWindow(QMainWindow):
 
     def _on_settings_saved(self):
         from src.storage.local_db import LocalDB
+        from PySide6.QtWidgets import QApplication, QWidget
+
         db = LocalDB()
         font_family = db.get_setting("font_family", "Segoe UI")
         font_size = int(db.get_setting("font_size", "14"))
 
-        font = self.font()
+        # 1. Меняем шрифт у самого приложения
+        app = QApplication.instance()
+        font = app.font()
         font.setFamily(font_family)
         font.setPointSize(font_size)
-        QApplication.instance().setFont(font)
+        app.setFont(font)
 
+        # 2. Принудительно применяем шрифт ко ВСЕМ виджетам (рекурсивно)
+        for widget in app.allWidgets():
+            widget.setFont(font)
+
+        # 3. Обновляем кнопку и плейсхолдер
         btn_text = db.get_setting("btn_text", "Отправить")
         placeholder = db.get_setting("placeholder", "Введите сообщение...")
         self.chat_view.btn_send.setText(btn_text)

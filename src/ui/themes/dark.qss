@@ -2,10 +2,9 @@
 
 /* Общий фон окна и базовый цвет текста */
 QWidget {
-    background-color: #1a1a2e; /* Чуть темнее, чтобы кнопки выделялись */
-    color: #cdd6f4;            /* Светло-серый/голубоватый текст (как в твоем коде) */
-    font-family: "Segoe UI", Arial, sans-serif;
-    font-size: 14px;
+    background-color: #1a1a2e;
+    color: #cdd6f4;
+}
 }
 
 /* Поля ввода (Логин, Пароль) */
