@@ -22,6 +22,22 @@ class LoginView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._setup_ui()
+        self._auto_fill_login()  # <--- ДОБАВИТЬ ЭТУ СТРОКУ
+
+    def _auto_fill_login(self):
+        """Автозаполняет логин, если есть сохраненная сессия."""
+        from src.core.user import list_saved_sessions
+        try:
+            sessions = list_saved_sessions()
+            if sessions:
+                # Берем последнюю сессию
+                last_session = sessions[-1]
+                self.input_login.setText(last_session["login"])
+                # Ставим курсор в поле пароля
+                self.input_password.setFocus()
+                logger.info(f"Автозаполнен логин: {last_session['login']}")
+        except Exception as e:
+            logger.error(f"Ошибка автозаполнения: {e}")
 
     def _auto_fill_login(self):
         """Автозаполняет логин, если есть сохраненная сессия."""
