@@ -3,7 +3,8 @@
 from pathlib import Path
 from PySide6.QtWidgets import (
     QMainWindow, QSplitter, QWidget, QVBoxLayout,
-    QPushButton, QLabel, QFrame, QDialog, QListWidget, QListWidgetItem, QApplication, QMessageBox
+    QPushButton, QLabel, QFrame, QDialog, QListWidget,
+    QListWidgetItem, QApplication, QMessageBox, QMenu
 )
 from PySide6.QtCore import Qt
 
@@ -12,6 +13,9 @@ from src.ui.chat_list import ChatListWidget
 from src.ui.chat_view import ChatViewWidget
 from src.ui.settings_view import SettingsView
 from src.core.account_manager import AccountManager
+from src.core.admin import load_admins, is_super, is_admin, make_admin, remove_admin, toggle_manage_rights
+from src.core.chat_logic import get_all_users_fp16
+from src.storage.local_db import LocalDB
 
 
 class MainWindow(QMainWindow):
@@ -29,55 +33,15 @@ class MainWindow(QMainWindow):
 
         central = QWidget()
         central.setObjectName("main_window_bg")
-        main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout = QVBoxLayout(central)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
 
         self.splitter = QSplitter(Qt.Horizontal)
 
-        # ==========================================
-        # 1. САЙДБАР
-        # ==========================================
-        self.sidebar = QFrame()
-        self.sidebar.setObjectName("sidebar")
-        self.sidebar.setFixedWidth(60)
+        # Создаем сайдбар (виджет)
+        self._setup_sidebar()
 
-        sidebar_layout = QVBoxLayout(self.sidebar)
-        sidebar_layout.setContentsMargins(5, 10, 5, 10)
-        sidebar_layout.setSpacing(10)
-
-        self.btn_settings = QPushButton("⚙️")
-        self.btn_settings.setFixedSize(45, 45)
-        self.btn_settings.setCursor(Qt.PointingHandCursor)
-        self.btn_settings.setToolTip("Настройки")
-        self.btn_settings.clicked.connect(self._open_settings)
-        sidebar_layout.addWidget(self.btn_settings)
-
-        if self.user.is_admin:
-            self.btn_admin = QPushButton("🛡")
-            self.btn_admin.setFixedSize(45, 45)
-            self.btn_admin.setCursor(Qt.PointingHandCursor)
-            self.btn_admin.setToolTip("Переключить админ-режим (Все чаты)")
-            self.btn_admin.clicked.connect(self._toggle_admin_mode)
-            sidebar_layout.addWidget(self.btn_admin)
-
-            self.btn_manage_admins = QPushButton("👑")
-            self.btn_manage_admins.setFixedSize(45, 45)
-            self.btn_manage_admins.setCursor(Qt.PointingHandCursor)
-            self.btn_manage_admins.setToolTip("Управление администраторами")
-            self.btn_manage_admins.clicked.connect(self._open_admins_panel)
-            sidebar_layout.addWidget(self.btn_manage_admins)
-
-        sidebar_layout.addStretch()
-
-        self.btn_profile = QPushButton("👤")
-        self.btn_profile.setFixedSize(45, 45)
-        self.btn_profile.setCursor(Qt.PointingHandCursor)
-        self.btn_profile.setToolTip(f"Профиль: {self.user.login}")
-        sidebar_layout.addWidget(self.btn_profile)
-
-        # ==========================================
-        # 2. СПИСОК ЧАТОВ
-        # ==========================================
+        # Список чатов
         self.chat_list = ChatListWidget(
             shared_folder=self.config.shared_folder,
             user_fp16=self.user.fp16,
@@ -87,9 +51,7 @@ class MainWindow(QMainWindow):
         self.chat_list.setMinimumWidth(250)
         self.chat_list.setMaximumWidth(400)
 
-        # ==========================================
-        # 3. ОКНО ЧАТА
-        # ==========================================
+        # Окно чата
         self.chat_view = ChatViewWidget(
             shared_folder=self.config.shared_folder,
             user=self.user
@@ -97,6 +59,7 @@ class MainWindow(QMainWindow):
 
         self.chat_list.chat_selected.connect(self.chat_view.load_chat)
 
+        # Добавляем всё в сплиттер
         self.splitter.addWidget(self.sidebar)
         self.splitter.addWidget(self.chat_list)
         self.splitter.addWidget(self.chat_view)
@@ -105,10 +68,58 @@ class MainWindow(QMainWindow):
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setStretchFactor(2, 3)
 
-        main_layout.addWidget(self.splitter)
+        self.main_layout.addWidget(self.splitter)
         self.setCentralWidget(central)
-
         self._on_settings_saved()
+
+    def _setup_sidebar(self):
+        """Создает или пересоздает виджет сайдбара."""
+        if not hasattr(self, 'sidebar'):
+            self.sidebar = QFrame()
+            self.sidebar.setObjectName("sidebar")
+            self.sidebar.setFixedWidth(60)
+            self.sidebar_layout = QVBoxLayout(self.sidebar)
+            self.sidebar_layout.setContentsMargins(5, 10, 5, 10)
+            self.sidebar_layout.setSpacing(10)
+        else:
+            # Если сайдбар уже есть, очищаем его layout
+            while self.sidebar_layout.count():
+                item = self.sidebar_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+
+        # Кнопка "Настройки"
+        self.btn_settings = QPushButton("⚙️")
+        self.btn_settings.setFixedSize(45, 45)
+        self.btn_settings.setCursor(Qt.PointingHandCursor)
+        self.btn_settings.setToolTip("Настройки")
+        self.btn_settings.clicked.connect(self._open_settings)
+        self.sidebar_layout.addWidget(self.btn_settings)
+
+        # Кнопки админа
+        if self.user.is_admin:
+            self.btn_admin = QPushButton("🛡")
+            self.btn_admin.setFixedSize(45, 45)
+            self.btn_admin.setCursor(Qt.PointingHandCursor)
+            self.btn_admin.setToolTip("Переключить админ-режим")
+            self.btn_admin.clicked.connect(self._toggle_admin_mode)
+            self.sidebar_layout.addWidget(self.btn_admin)
+
+            self.btn_manage_admins = QPushButton("👑")
+            self.btn_manage_admins.setFixedSize(45, 45)
+            self.btn_manage_admins.setCursor(Qt.PointingHandCursor)
+            self.btn_manage_admins.setToolTip("Управление администраторами")
+            self.btn_manage_admins.clicked.connect(self._open_admins_panel)
+            self.sidebar_layout.addWidget(self.btn_manage_admins)
+
+        self.sidebar_layout.addStretch()
+
+        # Кнопка профиля
+        self.btn_profile = QPushButton("👤")
+        self.btn_profile.setFixedSize(45, 45)
+        self.btn_profile.setCursor(Qt.PointingHandCursor)
+        self.btn_profile.setToolTip(f"Профиль: {self.user.login}")
+        self.sidebar_layout.addWidget(self.btn_profile)
 
     def _toggle_admin_mode(self):
         self.admin_mode = not self.admin_mode
@@ -121,14 +132,14 @@ class MainWindow(QMainWindow):
             self.btn_admin.setStyleSheet("")
 
     def _open_admins_panel(self):
-        from src.core.admin import is_admin, is_super, make_admin, remove_admin
-        from src.core.chat_logic import get_all_users_fp16
-        from src.storage.local_db import LocalDB
-        from PySide6.QtWidgets import QMenu
-
+        """Открывает панель управления админами."""
+        # Проверка прав (супер или can_manage)
         if not is_super(self.config.shared_folder, self.user.fp16):
-            QMessageBox.warning(self, "Доступ", "Только супер-админ может управлять администраторами.")
-            return
+            admins = load_admins(self.config.shared_folder)
+            me = next((a for a in admins if a["fp16"] == self.user.fp16), None)
+            if not me or not me.get("can_manage_admins", False):
+                QMessageBox.warning(self, "Доступ", "У вас нет прав на управление администраторами.")
+                return
 
         dialog = QDialog(self)
         dialog.setWindowTitle("👑 Управление администраторами")
@@ -159,20 +170,21 @@ class MainWindow(QMainWindow):
 
         def on_user_clicked(item):
             fp, is_adm, is_sup = item.data(Qt.UserRole)
-
             menu = QMenu(dialog)
 
             if not is_adm:
                 action_promote = menu.addAction("Назначить администратором")
                 action_promote.triggered.connect(lambda: self._do_promote(fp, dialog))
             elif not is_sup:
-                menu.addAction("Права: Чтение всех чатов (вкл)").setEnabled(False)
-                menu.addAction("Права: Управление админами (выкл)").setEnabled(False)
-                menu.addSeparator()
+                if is_super(self.config.shared_folder, self.user.fp16):
+                    action_toggle = menu.addAction("Переключить право 'Управление админами'")
+                    action_toggle.triggered.connect(lambda: self._toggle_rights(fp, dialog))
+                    menu.addSeparator()
+
                 action_demote = menu.addAction("Снять с админки")
                 action_demote.triggered.connect(lambda: self._do_demote(fp, dialog))
             else:
-                menu.addAction("Это супер-админ. Действия недоступны").setEnabled(False)
+                menu.addAction("Это супер-админ").setEnabled(False)
 
             menu.exec(dialog.mapToGlobal(dialog.cursor().pos()))
 
@@ -181,7 +193,6 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _do_promote(self, fp: str, dialog: QDialog):
-        from src.core.admin import make_admin
         try:
             make_admin(self.config.shared_folder, fp, by=self.user.fp16, by_priv=self.user.priv_pem)
             QMessageBox.information(dialog, "Успех", "Пользователь назначен админом")
@@ -190,10 +201,17 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(dialog, "Ошибка", str(e))
 
     def _do_demote(self, fp: str, dialog: QDialog):
-        from src.core.admin import remove_admin
         try:
             remove_admin(self.config.shared_folder, fp, by=self.user.fp16, by_priv=self.user.priv_pem)
             QMessageBox.information(dialog, "Успех", "Админ снят")
+            dialog.accept()
+        except Exception as e:
+            QMessageBox.warning(dialog, "Ошибка", str(e))
+
+    def _toggle_rights(self, fp: str, dialog: QDialog):
+        try:
+            toggle_manage_rights(self.config.shared_folder, fp, by=self.user.fp16)
+            QMessageBox.information(dialog, "Успех", "Права изменены")
             dialog.accept()
         except Exception as e:
             QMessageBox.warning(dialog, "Ошибка", str(e))
@@ -238,6 +256,10 @@ class MainWindow(QMainWindow):
         self.user = user
         self.setWindowTitle(f"Pygram - {user.login} ({user.role})")
 
+        # Пересоздаем кнопки в сайдбаре
+        self._setup_sidebar()
+
+        # Обновляем данные в chat_list и chat_view
         self.chat_list.user_fp16 = user.fp16
         self.chat_list.user_login = user.login
         self.chat_list.refresh_chats()
@@ -246,17 +268,7 @@ class MainWindow(QMainWindow):
         self.chat_view.text_browser.clear()
         self.chat_view.input_widget.setVisible(False)
 
-        # Обновляем кнопки в сайдбаре (если роль изменилась)
-        self.btn_settings.setVisible(True)
-        if hasattr(self, 'btn_admin'):
-            self.btn_admin.setVisible(user.is_admin)
-        if hasattr(self, 'btn_manage_admins'):
-            self.btn_manage_admins.setVisible(user.is_admin)
-
     def _on_settings_saved(self):
-        from src.storage.local_db import LocalDB
-        from PySide6.QtWidgets import QApplication
-
         db = LocalDB()
         font_family = db.get_setting("font_family", "Segoe UI")
         font_size = int(db.get_setting("font_size", "14"))
