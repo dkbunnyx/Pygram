@@ -1,7 +1,18 @@
 """Тесты для config.py."""
 
 import pytest
-from config import Config, load_config, get_config
+from config import Config, ensure_config, load_config, get_config
+
+
+@pytest.fixture(autouse=True)
+def isolate_app_dir(tmp_path, monkeypatch):
+    """Изолируем get_app_dir от реальной папки приложения."""
+    fake_app_dir = tmp_path / "app"
+    fake_app_dir.mkdir()
+    monkeypatch.setattr("config.get_app_dir", lambda: fake_app_dir)
+    get_config.cache_clear()
+    yield fake_app_dir
+    get_config.cache_clear()
 
 
 class TestConfigValidation:
@@ -50,14 +61,12 @@ class TestConfigValidation:
 
 
 class TestLoadConfig:
-    def test_env_missing(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
+    def test_env_missing(self, isolate_app_dir):
         with pytest.raises(FileNotFoundError, match=".env"):
             load_config()
 
-    def test_env_valid(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        (tmp_path / ".env").write_text(
+    def test_env_valid(self, isolate_app_dir):
+        (isolate_app_dir / ".env").write_text(
             "SHARED_FOLDER=share\n"
             "BACKUP_FOLDER=backup\n"
             "LOG_LEVEL=DEBUG\n"
@@ -74,18 +83,16 @@ class TestLoadConfig:
         assert c.session_ttl == 3600
         assert c.theme == "light"
 
-    def test_env_invalid_int(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        (tmp_path / ".env").write_text(
+    def test_env_invalid_int(self, isolate_app_dir):
+        (isolate_app_dir / ".env").write_text(
             "SHARED_FOLDER=s\nBACKUP_FOLDER=b\nMAX_ACCOUNTS=abc\n",
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="MAX_ACCOUNTS"):
             load_config()
 
-    def test_get_config_caches(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        (tmp_path / ".env").write_text(
+    def test_get_config_caches(self, isolate_app_dir):
+        (isolate_app_dir / ".env").write_text(
             "SHARED_FOLDER=s\nBACKUP_FOLDER=b\n",
             encoding="utf-8",
         )
@@ -93,4 +100,28 @@ class TestLoadConfig:
         c1 = get_config()
         c2 = get_config()
         assert c1 is c2
-        get_config.cache_clear()
+
+
+class TestEnsureConfig:
+    def test_creates_file(self, isolate_app_dir):
+        path = ensure_config("/tmp/share")
+        assert path.exists()
+        assert path == isolate_app_dir / ".env"
+        content = path.read_text(encoding="utf-8")
+        assert "SHARED_FOLDER=/tmp/share" in content
+        assert "BACKUP_FOLDER=" in content
+
+    def test_creates_loadable(self, isolate_app_dir):
+        ensure_config("/tmp/share")
+        c = load_config()
+        assert c.shared_folder == "/tmp/share"
+        assert c.log_level == "INFO"
+
+    def test_raises_if_exists(self, isolate_app_dir):
+        ensure_config("/tmp/share")
+        with pytest.raises(FileExistsError, match=".env"):
+            ensure_config("/tmp/other")
+
+    def test_empty_folder_raises(self, isolate_app_dir):
+        with pytest.raises(ValueError, match="shared_folder"):
+            ensure_config("")

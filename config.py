@@ -1,11 +1,15 @@
 """Конфигурация Pygram: загрузка и валидация настроек из .env."""
 
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
 from dotenv.main import load_dotenv
+
+from src.constants import get_app_dir
 
 
 @dataclass
@@ -16,6 +20,7 @@ class Config:
     max_accounts: int = 3
     session_ttl: int = 86400
     theme: str = "dark"
+
     def __post_init__(self) -> None:
         """Проверяет корректность значений после инициализации."""
         if not self.shared_folder or not self.shared_folder.strip():
@@ -41,18 +46,57 @@ class Config:
             )
 
 
+def _env_path() -> Path:
+    """Путь к .env: в папке приложения (dev — корень проекта, .exe — %APPDATA%\\Pygram)."""
+    return get_app_dir() / ".env"
+
+
+def ensure_config(shared_folder: str) -> Path:
+    """Создаёт .env с дефолтами при первом запуске.
+
+    Args:
+        shared_folder: Путь к папке шары (выбран пользователем в диалоге).
+
+    Returns:
+        Path: Путь к созданному .env.
+
+    Raises:
+        FileExistsError: если .env уже существует (не перезаписываем).
+        ValueError: если shared_folder пустой.
+    """
+    if not shared_folder or not shared_folder.strip():
+        raise ValueError("shared_folder не может быть пустым")
+
+    env_path = _env_path()
+    if env_path.exists():
+        raise FileExistsError(f".env уже существует: {env_path}")
+
+    backup_folder = str(get_app_dir() / "backups")
+    content = (
+        f"# Pygram config (создан автоматически при первом запуске)\n"
+        f"SHARED_FOLDER={shared_folder}\n"
+        f"BACKUP_FOLDER={backup_folder}\n"
+        f"LOG_LEVEL=INFO\n"
+        f"MAX_ACCOUNTS=3\n"
+        f"SESSION_TTL=86400\n"
+        f"THEME=dark\n"
+    )
+    env_path.write_text(content, encoding="utf-8")
+    return env_path
+
+
 def load_config() -> Config:
     """Загружает .env и возвращает объект Config.
 
     Raises:
-        FileNotFoundError: если .env не найден.
+        FileNotFoundError: если .env не найден (вызови ensure_config() сначала).
         ValueError: если значения в .env некорректны.
     """
-    env_path = Path(".env")
+    env_path = _env_path()
     if not env_path.exists():
         raise FileNotFoundError(
-            "Файл .env не найден. Скопируйте .env.example в .env "
-            "и заполните значения."
+            f"Файл .env не найден: {env_path}. "
+            f"Вызови ensure_config() для создания."
         )
 
     load_dotenv(env_path)

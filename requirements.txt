@@ -17,6 +17,7 @@ Pillow>=10.0
 pywin32>=306
 pystray>=0.19
 plyer>=2.1
+psutil>=5.9
 
 # Медиа
 sounddevice>=0.4
