@@ -158,3 +158,21 @@ def verify_signature(entry: dict, by_pub_pem: str) -> bool:
     except ValueError:
         return False
     return rsa_verify(by_pub_pem, payload, sig)
+
+
+def can_read_all_chats(shared_folder: Path | str, fp16: str) -> bool:
+    """Может ли пользователь читать все чаты?"""
+    if is_super(shared_folder, fp16):
+        return True
+    admins = load_admins(shared_folder)
+    entry = next((a for a in admins if a["fp16"] == fp16), None)
+    return entry.get("can_read_all_chats", False) if entry else False
+
+
+def can_manage_admins(shared_folder: Path | str, fp16: str) -> bool:
+    """Может ли пользователь управлять админами?"""
+    if is_super(shared_folder, fp16):
+        return True
+    admins = load_admins(shared_folder)
+    entry = next((a for a in admins if a["fp16"] == fp16), None)
+    return entry.get("can_manage_admins", False) if entry else False

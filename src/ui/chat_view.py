@@ -3,14 +3,17 @@
 from pathlib import Path
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
-    QTextBrowser, QLineEdit, QPushButton, QLabel
+    QTextBrowser, QLineEdit, QPushButton, QLabel, QFileDialog
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from loguru import logger
+import os
 
-from src.core.message import read_messages, send_message
+from src.core.message import read_messages, send_message, send_file
 from src.core.chat_logic import get_chat_meta
 from src.storage.local_db import LocalDB
+from src.storage.shared_store import chat_files_dir
 
 
 class ChatViewWidget(QWidget):
@@ -32,7 +35,9 @@ class ChatViewWidget(QWidget):
 
         self.text_browser = QTextBrowser()
         self.text_browser.setObjectName("message_history")
-        self.text_browser.setOpenExternalLinks(True)
+        self.text_browser.setOpenExternalLinks(False)  # Перехватываем клики
+        self.text_browser.setOpenLinks(False)
+        self.text_browser.anchorClicked.connect(self._on_anchor_clicked)
         layout.addWidget(self.text_browser)
 
         self.input_widget = QWidget()
@@ -40,6 +45,13 @@ class ChatViewWidget(QWidget):
 
         input_layout = QHBoxLayout(self.input_widget)
         input_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Кнопка прикрепления файла
+        self.btn_attach = QPushButton("📎")
+        self.btn_attach.setFixedSize(40, 40)
+        self.btn_attach.setCursor(Qt.PointingHandCursor)
+        self.btn_attach.clicked.connect(self._on_attach_clicked)
+        input_layout.addWidget(self.btn_attach)
 
         self.input_field = QLineEdit()
         self.input_field.setPlaceholderText("Введите сообщение...")
@@ -87,7 +99,6 @@ class ChatViewWidget(QWidget):
                 self.text_browser.setHtml("<i>Нет сообщений. Напишите первым!</i>")
                 return
 
-            # --- ОПРЕДЕЛЯЕМ ЦВЕТА ---
             db = LocalDB()
             theme = db.get_setting("theme", "base")
 
@@ -101,7 +112,6 @@ class ChatViewWidget(QWidget):
                 chat_bg = db.get_setting("color_chat_bg", "#1a1a2e")
                 self.text_browser.setStyleSheet(f"QTextBrowser {{ background-color: {chat_bg}; border: none; }}")
             else:
-                # Для основной темы (base)
                 bg_my = "#2b2b3d"
                 bg_other = "#252538"
                 text_color_my = "#ffffff"
@@ -119,6 +129,19 @@ class ChatViewWidget(QWidget):
 
                 sender_name = "Вы" if is_me else db.get_login_by_fp16(msg.sender_fp16)
 
+                # Обработка файлов
+                display_text = msg.text
+                if msg.text.startswith("[FILE]") and msg.text.endswith("[/FILE]"):
+                    inner = msg.text[6:-7]
+                    if "|" in inner:
+                        stored_name, display_name = inner.split("|", 1)
+                    else:
+                        stored_name = display_name = inner
+
+                    file_path = chat_files_dir(self.shared_folder, chat_id) / stored_name
+                    file_url = QUrl.fromLocalFile(str(file_path)).toString()
+                    display_text = f"📎 <a href='{file_url}' style='color: #89b4fa; text-decoration: none;'>📥 {display_name}</a>"
+
                 html += f"""
                 <div style="text-align: {align}; margin-top: 10px; margin-bottom: 10px;">
                     <div style="color: {name_color}; font-weight: bold; font-size: 11px; margin-bottom: 2px;">
@@ -126,7 +149,7 @@ class ChatViewWidget(QWidget):
                     </div>
                     <table align="{align}" cellpadding="8" cellspacing="0" style="background-color: {bg_color}; border-radius: 8px; color: {txt_color}; font-size: 14px;">
                         <tr>
-                            <td>{msg.text}</td>
+                            <td>{display_text}</td>
                         </tr>
                     </table>
                 </div>
@@ -140,6 +163,73 @@ class ChatViewWidget(QWidget):
         except Exception as e:
             logger.error(f"Ошибка загрузки чата {chat_id}: {e}")
             self.text_browser.setHtml(f"<b style='color: red;'>Ошибка загрузки сообщений</b><br>{e}")
+
+    def _on_anchor_clicked(self, url: QUrl):
+        """Скачивает файл из шары в локальную папку (рядом с .exe) и открывает."""
+        import shutil
+        import sys
+        from pathlib import Path
+
+        path_str = url.toLocalFile()
+        if not path_str:
+            return
+
+        src_path = Path(path_str)
+        if not src_path.exists():
+            return
+
+        # Определяем папку для скачивания
+        if getattr(sys, "frozen", False):
+            # Рядом с .exe
+            base_dir = Path(sys.executable).parent
+        else:
+            # В dev-режиме (папка проекта)
+            base_dir = Path(__file__).resolve().parent.parent.parent
+
+        download_dir = base_dir / "Downloads"
+
+        try:
+            download_dir.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            # Если нет прав (например, Program Files), кидаем в Загрузки
+            download_dir = Path.home() / "Downloads" / "Pygram"
+            download_dir.mkdir(parents=True, exist_ok=True)
+
+        # Оригинальное имя (из формата [FILE]stored|original[/FILE])
+        # Но у нас есть только src_path.name (хранимое имя), нужно вытащить оригинал
+        # Проще: если в имени есть "_", берем всё после первого "_"
+        stored_name = src_path.name
+        if "_" in stored_name:
+            display_name = stored_name.split("_", 1)[1]
+        else:
+            display_name = stored_name
+
+        dest_path = download_dir / display_name
+
+        try:
+            # Если файла еще нет, копируем
+            if not dest_path.exists():
+                shutil.copy2(src_path, dest_path)
+
+            # Открываем скачанный файл
+            os.startfile(str(dest_path))
+        except Exception as e:
+            logger.error(f"Ошибка скачивания файла: {e}")
+
+    def _on_attach_clicked(self):
+        if not self.current_chat_id:
+            return
+
+        file_path, _ = QFileDialog.getOpenFileName(self, "Выберите файл")
+        if file_path:
+            try:
+                send_file(
+                    self.shared_folder, self.current_chat_id,
+                    self.user.fp16, self.user.priv_pem, file_path
+                )
+                self.load_chat(self.current_chat_id)
+            except Exception as e:
+                logger.error(f"Ошибка отправки файла: {e}")
 
     def _on_send_clicked(self):
         if not self.current_chat_id:
