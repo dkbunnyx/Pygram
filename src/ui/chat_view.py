@@ -7,9 +7,10 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 from loguru import logger
-from src.storage.local_db import LocalDB
+
 from src.core.message import read_messages, send_message
 from src.core.chat_logic import get_chat_meta
+from src.storage.local_db import LocalDB
 
 
 class ChatViewWidget(QWidget):
@@ -34,8 +35,9 @@ class ChatViewWidget(QWidget):
         self.text_browser.setOpenExternalLinks(True)
         layout.addWidget(self.text_browser)
 
-        # Панель ввода (скрыта по умолчанию)
         self.input_widget = QWidget()
+        self.input_widget.setFixedHeight(60)
+
         input_layout = QHBoxLayout(self.input_widget)
         input_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -50,7 +52,6 @@ class ChatViewWidget(QWidget):
 
         layout.addWidget(self.input_widget)
 
-        # Скрываем панель, пока чат не выбран
         self.input_widget.setVisible(False)
         self.text_browser.setHtml("<i style='color: gray;'>Выберите чат слева, чтобы начать переписку</i>")
 
@@ -58,7 +59,6 @@ class ChatViewWidget(QWidget):
         self.current_chat_id = chat_id
         self.text_browser.clear()
 
-        # Показываем панель ввода, так как чат выбран
         self.input_widget.setVisible(True)
 
         try:
@@ -87,26 +87,50 @@ class ChatViewWidget(QWidget):
                 self.text_browser.setHtml("<i>Нет сообщений. Напишите первым!</i>")
                 return
 
+            # --- ОПРЕДЕЛЯЕМ ЦВЕТА ---
             db = LocalDB()
+            theme = db.get_setting("theme", "base")
+
+            if theme == "custom":
+                bg_my = db.get_setting("color_my_msg", "#4a90e2")
+                bg_other = db.get_setting("color_other_msg", "#e2a04a")
+                text_color_my = "#ffffff"
+                text_color_other = "#ffffff"
+                name_color = "#ffffff"
+
+                chat_bg = db.get_setting("color_chat_bg", "#1a1a2e")
+                self.text_browser.setStyleSheet(f"QTextBrowser {{ background-color: {chat_bg}; border: none; }}")
+            else:
+                # Для основной темы (base)
+                bg_my = "#2b2b3d"
+                bg_other = "#252538"
+                text_color_my = "#ffffff"
+                text_color_other = "#cdd6f4"
+                name_color = "#89b4fa"
+                self.text_browser.setStyleSheet("")
 
             html = ""
             for msg in messages:
                 is_me = (msg.sender_fp16 == self.user.fp16)
-                color = "#4a90e2" if is_me else "#e2a04a"
                 align = "right" if is_me else "left"
 
-                # Получаем логин из БД
+                bg_color = bg_my if is_me else bg_other
+                txt_color = text_color_my if is_me else text_color_other
+
                 sender_name = "Вы" if is_me else db.get_login_by_fp16(msg.sender_fp16)
 
                 html += f"""
-                           <div style="text-align: {align}; margin: 5px;">
-                               <span style="color: {color}; font-weight: bold;">{sender_name}</span>
-                               <br>
-                               <span style="background: #2a2a2a; padding: 5px 10px; border-radius: 10px; display: inline-block;">
-                                   {msg.text}
-                               </span>
-                           </div>
-                           """
+                <div style="text-align: {align}; margin-top: 10px; margin-bottom: 10px;">
+                    <div style="color: {name_color}; font-weight: bold; font-size: 11px; margin-bottom: 2px;">
+                        {sender_name}
+                    </div>
+                    <table align="{align}" cellpadding="8" cellspacing="0" style="background-color: {bg_color}; border-radius: 8px; color: {txt_color}; font-size: 14px;">
+                        <tr>
+                            <td>{msg.text}</td>
+                        </tr>
+                    </table>
+                </div>
+                """
 
             self.text_browser.setHtml(html)
             self.text_browser.verticalScrollBar().setValue(

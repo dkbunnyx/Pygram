@@ -1,0 +1,96 @@
+/* src/ui/themes/base.qss */
+
+QWidget {
+    background-color: #1a1a2e;
+    color: #cdd6f4;
+}
+
+QLineEdit {
+    background-color: #252538;
+    border: 1px solid #313148;
+    border-radius: 8px;
+    padding: 10px;
+    color: #cdd6f4;
+}
+
+QLineEdit:focus {
+    border: 1px solid #89b4fa;
+}
+
+QPushButton {
+    background-color: #252538;
+    border: 1px solid #313148;
+    border-radius: 8px;
+    color: #cdd6f4;
+    padding: 10px;
+    font-weight: bold;
+}
+
+QPushButton:hover {
+    background-color: #313148;
+    border: 1px solid #89b4fa;
+}
+
+QPushButton:pressed {
+    background-color: #1a1a2e;
+}
+
+QPushButton#btn_register {
+    background-color: transparent;
+    border: none;
+    color: #89b4fa;
+    text-decoration: underline;
+    font-weight: normal;
+    font-size: 13px;
+}
+
+QPushButton#btn_register:hover {
+    color: #b4befe;
+}
+
+QLabel#error_label {
+    color: #f38ba8;
+    font-size: 12px;
+}
+
+QLabel#title_label {
+    font-size: 32px;
+    font-weight: bold;
+    color: #cdd6f4;
+    padding-bottom: 20px;
+}
+
+#sidebar {
+    background-color: #1a1a1a;
+    border-right: 1px solid #2a2a2a;
+}
+
+#sidebar QPushButton {
+    background-color: transparent;
+    border: none;
+    border-radius: 10px;
+    font-size: 20px;
+}
+#sidebar QPushButton:hover {
+    background-color: #2a2a2a;
+}
+#sidebar QPushButton:pressed {
+    background-color: #3a3a3a;
+}
+
+QListWidget {
+    background-color: transparent;
+    border: none;
+    outline: none;
+}
+QListWidget::item {
+    padding: 10px;
+    border-radius: 5px;
+}
+QListWidget::item:hover {
+    background-color: #2a2a2a;
+}
+QListWidget::item:selected {
+    background-color: #313148;
+    color: #89b4fa;
+}

@@ -4,10 +4,12 @@ from pathlib import Path
 from loguru import logger
 
 
-def load_theme(app, theme_name: str = "dark"):
+def load_theme(app, theme_name: str = "base"):
     """Загружает QSS-файл и применяет его ко всему приложению."""
     try:
-        # Ищем папку themes внутри src/ui/
+        if theme_name == "custom":
+            theme_name = "base"
+
         theme_path = Path(__file__).parent / "themes" / f"{theme_name}.qss"
 
         if theme_path.exists():
