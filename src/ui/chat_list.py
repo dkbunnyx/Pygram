@@ -32,9 +32,10 @@ class ChatListWidget(QWidget):
         self.user_is_admin = user_is_admin
         self.profile_dir = Path(shared_folder) / ".profiles"
         self._last_unread = {}
+
         # ID чата, который сейчас открыт в ChatViewWidget.
-        # Для него счётчик и уведомления не показываются.
         self.current_open_chat_id: str | None = None
+
         self._setup_ui()
         self.refresh_chats()
 
@@ -96,6 +97,17 @@ class ChatListWidget(QWidget):
                     self._add_chat_item(chat, show_unread=True)
                 self._check_new_messages(chats)
 
+                # --- АВТОВЫБОР ПЕРВОГО ЧАТА ---
+                if not self.current_open_chat_id:
+                    first_chat_id = chats[0]["chat_id"]
+                    self.current_open_chat_id = first_chat_id
+                    for i in range(self.list_widget.count()):
+                        item = self.list_widget.item(i)
+                        if item.data(Qt.UserRole) == first_chat_id:
+                            self.list_widget.setCurrentItem(item)
+                            break
+                    self.chat_selected.emit(first_chat_id)
+
             if self.user_is_admin:
                 header_all = QListWidgetItem("СПИСОК ВСЕХ ЧАТОВ: ")
                 header_all.setFlags(Qt.NoItemFlags)
@@ -107,7 +119,6 @@ class ChatListWidget(QWidget):
 
                 for chat in all_chats:
                     if chat["chat_id"] not in my_chat_ids:
-                        # Для чужих чатов не показываем счетчик
                         self._add_chat_item(chat, prefix="  ", show_unread=False)
 
         except Exception as e:

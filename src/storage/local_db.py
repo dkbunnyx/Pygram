@@ -10,7 +10,7 @@ from loguru import logger
 
 from src.os_integration.win import get_local_dir
 
-DB_VERSION = 2  # Увеличили версию, так как добавили новую таблицу
+DB_VERSION = 2
 
 
 class LocalDB:
@@ -19,20 +19,16 @@ class LocalDB:
             db_path = get_local_dir() / "pygram.db"
 
         self.path = db_path
-        # Каждый поток получает свое соединение
         self._local = threading.local()
 
-        # Инициализируем схему в главном потоке
         conn = self._get_conn()
         self._init_schema()
-        # Соединение оставляем открытым! Не закрываем его.
 
     def _get_conn(self) -> sqlite3.Connection:
-        """Возвращает соединение для текущего потока."""
         if not hasattr(self._local, "conn"):
             conn = sqlite3.connect(str(self.path), check_same_thread=False)
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")  # Важно для многопоточности
+            conn.execute("PRAGMA journal_mode=WAL")
             self._local.conn = conn
         return self._local.conn
 
@@ -65,7 +61,6 @@ class LocalDB:
             )
         """)
 
-        # Таблица соответствия fp16 -> login
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users_map (
                 fp16 TEXT PRIMARY KEY,
@@ -73,7 +68,6 @@ class LocalDB:
             )
         """)
 
-        # НОВАЯ ТАБЛИЦА: кэш чатов (тип и название)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS chats_cache (
                 chat_id TEXT PRIMARY KEY,
@@ -87,7 +81,6 @@ class LocalDB:
         logger.info(f"БД инициализирована: {self.path}")
 
     def close(self):
-        """Закрывает соединение текущего потока."""
         if hasattr(self._local, "conn") and self._local.conn:
             self._local.conn.close()
             self._local.conn = None
@@ -102,6 +95,12 @@ class LocalDB:
             "INSERT OR REPLACE INTO messages (msg_id, chat_id, sender_fp16, text, ts) VALUES (?, ?, ?, ?, ?)",
             (msg_id, chat_id, sender_fp16, text, ts)
         )
+        conn.commit()
+
+    def delete_message(self, msg_id: str):
+        """Удаляет сообщение из локального кэша."""
+        conn = self._get_conn()
+        conn.execute("DELETE FROM messages WHERE msg_id = ?", (msg_id,))
         conn.commit()
 
     def get_messages(self, chat_id: str) -> list[dict]:
@@ -146,7 +145,7 @@ class LocalDB:
         return row["value"] if row else default
 
     # ========================================================================
-    # Маппинг пользователей (fp16 -> login)
+    # Маппинг пользователей
     # ========================================================================
 
     def save_user_map(self, fp16: str, login: str):
@@ -157,14 +156,13 @@ class LocalDB:
     def get_login_by_fp16(self, fp16: str) -> str:
         cursor = self._get_conn().execute("SELECT login FROM users_map WHERE fp16 = ?", (fp16,))
         row = cursor.fetchone()
-        return row["login"] if row else fp16[:8]  # Если не нашли, возвращаем обрезок fp16
+        return row["login"] if row else fp16[:8]
 
     # ========================================================================
-    # Кэш чатов (тип и название)
+    # Кэш чатов
     # ========================================================================
 
     def save_chat_cache(self, chat_id: str, chat_type: str, title: str):
-        """Сохраняет тип и название чата, чтобы не читать их из сети каждый раз."""
         conn = self._get_conn()
         conn.execute(
             "INSERT OR REPLACE INTO chats_cache (chat_id, chat_type, title) VALUES (?, ?, ?)",
@@ -173,7 +171,6 @@ class LocalDB:
         conn.commit()
 
     def get_chat_cache(self, chat_id: str) -> dict | None:
-        """Возвращает закэшированные данные чата (мгновенно)."""
         cursor = self._get_conn().execute(
             "SELECT chat_type, title FROM chats_cache WHERE chat_id = ?",
             (chat_id,)
