@@ -24,7 +24,7 @@ class SettingsView(QWidget):
 
     def _setup_ui(self):
         self.setWindowTitle("Настройки Pygram")
-        self.resize(600, 650)
+        self.resize(600, 700)
 
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
@@ -45,7 +45,6 @@ class SettingsView(QWidget):
         c_layout.setContentsMargins(0, 0, 0, 0)
 
         c_layout.addWidget(QLabel("<b>Настройка цветов</b>"))
-
         self.btn_bg = QPushButton("Цвет фона приложения (сайдбар, списки)")
         self.btn_bg.clicked.connect(lambda: self._pick_color("color_bg", self.btn_bg))
         c_layout.addWidget(self.btn_bg)
@@ -89,7 +88,6 @@ class SettingsView(QWidget):
         self.input_placeholder = QLineEdit()
         p_layout.addWidget(self.input_placeholder)
 
-        # --- ЭМОДЗИ ДЛЯ КНОПКИ ---
         p_layout.addWidget(QLabel("Эмодзи для кнопки чата:"))
         emoji_row = QHBoxLayout()
         self.btn_emoji_picker = QPushButton("😊")
@@ -98,6 +96,16 @@ class SettingsView(QWidget):
         emoji_row.addWidget(self.btn_emoji_picker)
         emoji_row.addStretch()
         p_layout.addLayout(emoji_row)
+
+        # Быстрая реакция
+        p_layout.addWidget(QLabel("Быстрая реакция (двойной клик):"))
+        quick_row = QHBoxLayout()
+        self.btn_quick_reaction = QPushButton("❤️")
+        self.btn_quick_reaction.setFixedSize(50, 40)
+        self.btn_quick_reaction.clicked.connect(self._on_pick_quick_reaction)
+        quick_row.addWidget(self.btn_quick_reaction)
+        quick_row.addStretch()
+        p_layout.addLayout(quick_row)
 
         p_layout.addStretch()
 
@@ -151,8 +159,8 @@ class SettingsView(QWidget):
 
         self._on_theme_changed(self.combo_theme.currentText())
 
-        # Загружаем эмодзи для кнопки
         self.btn_emoji_picker.setText(db.get_setting("emoji_button", "😊"))
+        self.btn_quick_reaction.setText(db.get_setting("quick_reaction", "❤️"))
 
         self.accounts_list.clear()
         for acc in self.account_manager.accounts:
@@ -175,16 +183,25 @@ class SettingsView(QWidget):
 
     def _on_pick_emoji(self):
         from src.ui.widgets.emoji_picker import EmojiPicker
-
         picker = EmojiPicker()
         picker.emoji_selected.connect(self._set_emoji_button)
-
         pos = self.btn_emoji_picker.mapToGlobal(self.btn_emoji_picker.rect().bottomLeft())
         picker.move(pos)
         picker.show()
 
     def _set_emoji_button(self, emoji: str):
         self.btn_emoji_picker.setText(emoji)
+
+    def _on_pick_quick_reaction(self):
+        from src.ui.widgets.emoji_picker import EmojiPicker
+        picker = EmojiPicker()
+        picker.emoji_selected.connect(self._set_quick_reaction)
+        pos = self.btn_quick_reaction.mapToGlobal(self.btn_quick_reaction.rect().bottomLeft())
+        picker.move(pos)
+        picker.show()
+
+    def _set_quick_reaction(self, emoji: str):
+        self.btn_quick_reaction.setText(emoji)
 
     def _on_save(self):
         db = LocalDB()
@@ -193,6 +210,7 @@ class SettingsView(QWidget):
         db.set_setting("btn_text", self.input_btn_text.text() or "Отправить")
         db.set_setting("placeholder", self.input_placeholder.text() or "Введите сообщение...")
         db.set_setting("emoji_button", self.btn_emoji_picker.text())
+        db.set_setting("quick_reaction", self.btn_quick_reaction.text())
 
         theme_str = "custom" if "Пользовательская" in self.combo_theme.currentText() else "base"
         db.set_setting("theme", theme_str)

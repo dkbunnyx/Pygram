@@ -63,7 +63,7 @@ class MainWindow(QMainWindow):
             user=self.user
         )
 
-        self.chat_list.chat_selected.connect(self.chat_view.load_chat)
+        self.chat_list.chat_selected.connect(self._on_chat_selected)
 
         self.splitter.addWidget(self.sidebar)
         self.splitter.addWidget(self.chat_list)
@@ -76,6 +76,11 @@ class MainWindow(QMainWindow):
         self.main_layout.addWidget(self.splitter)
         self.setCentralWidget(central)
         self._on_settings_saved()
+
+    def _on_chat_selected(self, chat_id: str):
+        """Загружает чат и обновляет список (чтобы убрать счетчик)."""
+        self.chat_view.load_chat(chat_id)
+        self.chat_list.refresh_chats()
 
     def closeEvent(self, event):
         set_online(self.config.shared_folder, self.user.fp16, False)
@@ -120,7 +125,6 @@ class MainWindow(QMainWindow):
 
         self.sidebar_layout.addStretch()
 
-        # Кнопка профиля с аватаркой
         self.btn_profile = QPushButton()
         self.btn_profile.setFixedSize(45, 45)
         self.btn_profile.setCursor(Qt.PointingHandCursor)

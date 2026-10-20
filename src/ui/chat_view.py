@@ -5,9 +5,10 @@ import json
 from datetime import datetime
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QDialog,
-    QTextBrowser, QLineEdit, QPushButton, QLabel, QFileDialog
+    QListWidget, QListWidgetItem, QLineEdit, QPushButton,
+    QLabel, QFileDialog, QMessageBox, QMenu
 )
-from PySide6.QtCore import Qt, QUrl, QEvent, QTimer
+from PySide6.QtCore import Qt, QUrl, QEvent, QTimer, QPoint
 from PySide6.QtGui import QDesktopServices, QKeySequence, QPixmap, QGuiApplication
 from loguru import logger
 import os
@@ -20,8 +21,12 @@ from src.core.chat_logic import get_chat_meta
 from src.core.crypto import unwrap_key, aes_decrypt, from_base64
 from src.storage.local_db import LocalDB
 from src.storage.shared_store import chat_files_dir, chat_message_dir, load_chat_keys, load_chat_meta_enc
-from src.core.status import get_status, set_typing, mark_messages_read, get_read_messages
+from src.core.status import (
+    get_status, set_typing, mark_messages_read, get_read_messages,
+    set_reaction, get_reactions, delete_message, get_deleted_messages
+)
 from src.ui.widgets.emoji_picker import EmojiPicker
+from src.ui.widgets.message_widget import MessageWidget
 
 
 class ImageConfirmDialog(QDialog):
@@ -60,10 +65,15 @@ class ChatViewWidget(QWidget):
         self.current_other_fp = None
         self._last_msg_count = -1
         self._last_read_count = -1
+        self._last_deleted_count = -1
         self._setup_ui()
 
         self.emoji_picker = EmojiPicker()
         self.emoji_picker.emoji_selected.connect(self._insert_emoji)
+
+        self.reaction_picker = EmojiPicker()
+        self.reaction_picker.emoji_selected.connect(self._apply_reaction)
+        self._reaction_msg_id = None
 
         self.status_timer = QTimer(self)
         self.status_timer.timeout.connect(self._update_status)
@@ -107,12 +117,24 @@ class ChatViewWidget(QWidget):
 
         layout.addWidget(self.header_widget)
 
-        self.text_browser = QTextBrowser()
-        self.text_browser.setObjectName("message_history")
-        self.text_browser.setOpenExternalLinks(False)
-        self.text_browser.setOpenLinks(False)
-        self.text_browser.anchorClicked.connect(self._on_anchor_clicked)
-        layout.addWidget(self.text_browser)
+        self.messages_list = QListWidget()
+        self.messages_list.setObjectName("messages_list")
+        self.messages_list.setStyleSheet("""
+            QListWidget {
+                background-color: transparent;
+                border: none;
+                outline: none;
+            }
+            QListWidget::item {
+                padding: 0px;
+                margin: 0px;
+            }
+            QListWidget::item:selected {
+                background: transparent;
+            }
+        """)
+        self.messages_list.setSelectionMode(QListWidget.NoSelection)
+        layout.addWidget(self.messages_list)
 
         self.input_widget = QWidget()
         self.input_widget.setFixedHeight(60)
@@ -120,7 +142,6 @@ class ChatViewWidget(QWidget):
         input_layout = QHBoxLayout(self.input_widget)
         input_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Кнопка эмодзи (слева)
         db = LocalDB()
         emoji_btn = db.get_setting("emoji_button", "😊")
         self.btn_emoji = QPushButton(emoji_btn)
@@ -129,21 +150,18 @@ class ChatViewWidget(QWidget):
         self.btn_emoji.clicked.connect(self._on_emoji_clicked)
         input_layout.addWidget(self.btn_emoji)
 
-        # Поле ввода
         self.input_field = QLineEdit()
         self.input_field.setPlaceholderText("Введите сообщение...")
         self.input_field.returnPressed.connect(self._on_send_clicked)
         self.input_field.installEventFilter(self)
         input_layout.addWidget(self.input_field)
 
-        # Кнопка скрепки (между полем и кнопкой отправить)
         self.btn_attach = QPushButton("📎")
         self.btn_attach.setFixedSize(40, 40)
         self.btn_attach.setCursor(Qt.PointingHandCursor)
         self.btn_attach.clicked.connect(self._on_attach_clicked)
         input_layout.addWidget(self.btn_attach)
 
-        # Кнопка отправить
         self.btn_send = QPushButton("Отправить")
         self.btn_send.clicked.connect(self._on_send_clicked)
         input_layout.addWidget(self.btn_send)
@@ -151,7 +169,36 @@ class ChatViewWidget(QWidget):
         layout.addWidget(self.input_widget)
 
         self.input_widget.setVisible(False)
-        self.text_browser.setHtml("<i style='color: gray;'>Выберите чат слева, чтобы начать переписку</i>")
+
+    def eventFilter(self, obj, event):
+        if hasattr(self, 'input_field') and obj is self.input_field and event.type() == QEvent.KeyPress:
+            if self.current_chat_id and self.current_other_fp:
+                set_typing(self.shared_folder, self.user.fp16, self.current_chat_id, True)
+                self.typing_timer.start(3000)
+
+            if event.matches(QKeySequence.Paste):
+                clipboard = QGuiApplication.clipboard()
+                if clipboard.mimeData().hasImage():
+                    image = clipboard.image()
+                    if not image.isNull():
+                        dialog = ImageConfirmDialog(image, self)
+                        if dialog.exec() == QDialog.Accepted:
+                            temp_dir = Path(tempfile.gettempdir())
+                            temp_path = temp_dir / "pygram_clipboard.png"
+                            image.save(str(temp_path), "PNG")
+
+                            try:
+                                send_file(
+                                    self.shared_folder, self.current_chat_id,
+                                    self.user.fp16, self.user.priv_pem, temp_path
+                                )
+                                self.load_chat(self.current_chat_id)
+                            except Exception as e:
+                                logger.error(f"Ошибка отправки скриншота: {e}")
+
+                            temp_path.unlink(missing_ok=True)
+                        return True
+        return super().eventFilter(obj, event)
 
     def _on_emoji_clicked(self):
         pos = self.btn_emoji.mapToGlobal(self.btn_emoji.rect().topLeft())
@@ -167,9 +214,94 @@ class ChatViewWidget(QWidget):
         self.input_field.setCursorPosition(cursor_pos + len(emoji))
         self.input_field.setFocus()
 
+    def _apply_reaction(self, emoji: str):
+        if not self._reaction_msg_id:
+            return
+
+        try:
+            reactions = get_reactions(self.shared_folder, self.current_chat_id, self._reaction_msg_id)
+            if reactions.get(self.user.fp16) == emoji:
+                set_reaction(self.shared_folder, self.current_chat_id, self._reaction_msg_id, self.user.fp16, None)
+            else:
+                set_reaction(self.shared_folder, self.current_chat_id, self._reaction_msg_id, self.user.fp16, emoji)
+
+            self.load_chat(self.current_chat_id)
+        except Exception as e:
+            logger.error(f"Ошибка установки реакции: {e}")
+        finally:
+            self._reaction_msg_id = None
+
+    def _on_message_clicked(self, msg_id: str):
+        menu = QMenu(self)
+        db = LocalDB()
+        quick_emoji = db.get_setting("quick_reaction", "❤️")
+        reactions = get_reactions(self.shared_folder, self.current_chat_id, msg_id)
+        my_reaction = reactions.get(self.user.fp16)
+
+        if my_reaction:
+            action_remove = menu.addAction(f"Убрать {my_reaction}")
+            action_remove.triggered.connect(lambda: self._remove_reaction(msg_id))
+
+        action_quick = menu.addAction(f"Поставить {quick_emoji}")
+        action_quick.triggered.connect(lambda: self._set_reaction(msg_id, quick_emoji))
+
+        menu.addSeparator()
+        action_all = menu.addAction("Все реакции...")
+        action_all.triggered.connect(lambda: self._open_reaction_picker(msg_id))
+
+        menu.addSeparator()
+        action_delete = menu.addAction("🗑 Удалить сообщение")
+        action_delete.triggered.connect(lambda: self._show_delete_menu(msg_id))
+
+        menu.exec(self.cursor().pos())
+
+    def _show_delete_menu(self, msg_id: str):
+        menu = QMenu(self)
+
+        action_self = menu.addAction("Удалить у себя")
+        action_self.triggered.connect(lambda: self._delete_message(msg_id, for_everyone=False))
+
+        action_all = menu.addAction("Удалить у всех")
+        action_all.triggered.connect(lambda: self._delete_message(msg_id, for_everyone=True))
+
+        menu.exec(self.cursor().pos())
+
+    def _delete_message(self, msg_id: str, for_everyone: bool):
+        try:
+            delete_message(self.shared_folder, self.current_chat_id, msg_id, self.user.fp16, for_everyone)
+            self.load_chat(self.current_chat_id)
+        except Exception as e:
+            logger.error(f"Ошибка удаления: {e}")
+
+    def _on_message_double_clicked(self, msg_id: str):
+        db = LocalDB()
+        quick_emoji = db.get_setting("quick_reaction", "❤️")
+
+        reactions = get_reactions(self.shared_folder, self.current_chat_id, msg_id)
+        if reactions.get(self.user.fp16) == quick_emoji:
+            set_reaction(self.shared_folder, self.current_chat_id, msg_id, self.user.fp16, None)
+        else:
+            set_reaction(self.shared_folder, self.current_chat_id, msg_id, self.user.fp16, quick_emoji)
+
+        self.load_chat(self.current_chat_id)
+
+    def _open_reaction_picker(self, msg_id: str):
+        self._reaction_msg_id = msg_id
+        pos = self.cursor().pos()
+        self.reaction_picker.move(pos)
+        self.reaction_picker.show()
+
+    def _set_reaction(self, msg_id: str, emoji: str):
+        set_reaction(self.shared_folder, self.current_chat_id, msg_id, self.user.fp16, emoji)
+        self.load_chat(self.current_chat_id)
+
+    def _remove_reaction(self, msg_id: str):
+        set_reaction(self.shared_folder, self.current_chat_id, msg_id, self.user.fp16, None)
+        self.load_chat(self.current_chat_id)
+
     def load_chat(self, chat_id: str):
         self.current_chat_id = chat_id
-        self.text_browser.clear()
+        self.messages_list.clear()
 
         self.avatar_label.setVisible(False)
         self.avatar_label.clear()
@@ -187,7 +319,7 @@ class ChatViewWidget(QWidget):
             profile_dir = Path(self.shared_folder) / ".profiles"
 
             font_family = db.get_setting("font_family", "Segoe UI")
-            font_size = db.get_setting("font_size", "14")
+            font_size = int(db.get_setting("font_size", "14"))
 
             self.current_other_fp = None
 
@@ -250,57 +382,33 @@ class ChatViewWidget(QWidget):
                 self.user.fp16, self.user.priv_pem
             )
 
+            deleted_ids = get_deleted_messages(self.shared_folder, chat_id, self.user.fp16)
+            messages = [m for m in messages if m.msg_id not in deleted_ids]
+
             if not messages:
-                self.text_browser.setHtml("<i>Нет сообщений. Напишите первым!</i>")
+                item = QListWidgetItem("Нет сообщений. Напишите первым!")
+                item.setFlags(Qt.NoItemFlags)
+                self.messages_list.addItem(item)
                 return
 
-            if self.current_other_fp:
-                incoming_ids = [m.msg_id for m in messages if m.sender_fp16 != self.user.fp16]
-                if incoming_ids:
-                    mark_messages_read(self.shared_folder, chat_id, self.user.fp16, incoming_ids)
+            # Помечаем ВСЕ входящие сообщения как прочитанные (для любого типа чата)
+            incoming_ids = [m.msg_id for m in messages if m.sender_fp16 != self.user.fp16]
+            if incoming_ids:
+                mark_messages_read(self.shared_folder, chat_id, self.user.fp16, incoming_ids)
 
             read_by_other = []
             if self.current_other_fp:
                 read_by_other = get_read_messages(self.shared_folder, chat_id, self.current_other_fp)
 
-            theme = db.get_setting("theme", "base")
-
-            if theme == "custom":
-                bg_my = db.get_setting("color_my_msg", "#4a90e2")
-                bg_other = db.get_setting("color_other_msg", "#e2a04a")
-                text_color_my = "#ffffff"
-                text_color_other = "#ffffff"
-                name_color = "#ffffff"
-
-                chat_bg = db.get_setting("color_chat_bg", "#1a1a2e")
-                self.text_browser.setStyleSheet(f"QTextBrowser {{ background-color: {chat_bg}; border: none; }}")
-            else:
-                bg_my = "#2b2b3d"
-                bg_other = "#252538"
-                text_color_my = "#ffffff"
-                text_color_other = "#cdd6f4"
-                name_color = "#89b4fa"
-                self.text_browser.setStyleSheet("")
-
-            html = ""
             for msg in messages:
                 is_me = (msg.sender_fp16 == self.user.fp16)
-                align = "right" if is_me else "left"
-
-                bg_color = bg_my if is_me else bg_other
-                txt_color = text_color_my if is_me else text_color_other
-
                 sender_name = "Вы" if is_me else db.get_login_by_fp16(msg.sender_fp16)
 
-                avatar_html = ""
-                sender_avatar_path = profile_dir / f"{msg.sender_fp16}.png"
-                if sender_avatar_path.exists():
-                    avatar_url = QUrl.fromLocalFile(str(sender_avatar_path)).toString()
-                    avatar_html = f"<img src='{avatar_url}' width='20' height='20' style='border-radius: 10px;' />&nbsp;"
+                avatar_path = profile_dir / f"{msg.sender_fp16}.png"
+                avatar_path_str = str(avatar_path) if avatar_path.exists() else None
 
                 dt = datetime.fromtimestamp(msg.ts / 1000)
                 time_str = dt.strftime("%H:%M")
-                time_color = "#aaaaaa" if not is_me else "#dddddd"
 
                 checkmark = ""
                 if is_me:
@@ -308,6 +416,16 @@ class ChatViewWidget(QWidget):
                         checkmark = " ✓✓"
                     else:
                         checkmark = " ✓"
+
+                reactions = get_reactions(self.shared_folder, chat_id, msg.msg_id)
+                reactions_html = ""
+                if reactions:
+                    from collections import Counter
+                    counts = Counter(reactions.values())
+                    parts = []
+                    for emoji, count in counts.items():
+                        parts.append(f"{emoji} {count}")
+                    reactions_html = ' '.join(parts)
 
                 display_text = msg.text
                 if msg.text.startswith("[FILE]") and msg.text.endswith("[/FILE]"):
@@ -322,41 +440,36 @@ class ChatViewWidget(QWidget):
 
                     if ext in ('png', 'jpg', 'jpeg', 'gif', 'bmp'):
                         file_url = QUrl.fromLocalFile(str(file_path)).toString()
-                        display_text = f"""
-                        <div style="text-align: center;">
-                            <a href='{file_url}'>
-                                <img src='{file_url}' style='max-width: 250px; max-height: 250px; border-radius: 5px;' />
-                            </a>
-                        </div>
-                        """
+                        display_text = f'<a href="{file_url}"><img src="{file_url}" width="200" /></a>'
                     else:
                         file_url = QUrl.fromLocalFile(str(file_path)).toString()
-                        display_text = f"📎 <a href='{file_url}' style='color: #89b4fa; text-decoration: none;'>📥 {display_name}</a>"
+                        display_text = f'<a href="{file_url}" style="color: #89b4fa;">📥 {display_name}</a>'
 
-                html += f"""
-                <div style="text-align: {align}; margin-top: 10px; margin-bottom: 10px; font-family: '{font_family}';">
-                    <div style="color: {name_color}; font-weight: bold; font-size: 9pt; margin-bottom: 2px;">
-                        {avatar_html}{sender_name}
-                    </div>
-                    <table align="{align}" cellpadding="8" cellspacing="0" style="background-color: {bg_color}; border-radius: 8px; color: {txt_color}; font-size: {font_size}pt; font-family: '{font_family}';">
-                        <tr>
-                            <td>{display_text}</td>
-                        </tr>
-                        <tr>
-                            <td style="text-align: right; font-size: 8pt; color: {time_color}; padding-top: 0;">{time_str}{checkmark}</td>
-                        </tr>
-                    </table>
-                </div>
-                """
+                widget = MessageWidget(
+                    msg_id=msg.msg_id,
+                    sender_name=sender_name,
+                    text_html=display_text,
+                    time_str=time_str + checkmark,
+                    is_me=is_me,
+                    avatar_path=avatar_path_str,
+                    reactions_html=reactions_html,
+                    font_size=font_size
+                )
+                widget.clicked.connect(self._on_message_clicked)
+                widget.double_clicked.connect(self._on_message_double_clicked)
 
-            self.text_browser.setHtml(html)
-            self.text_browser.verticalScrollBar().setValue(
-                self.text_browser.verticalScrollBar().maximum()
-            )
+                item = QListWidgetItem()
+                item.setSizeHint(widget.sizeHint())
+                self.messages_list.addItem(item)
+                self.messages_list.setItemWidget(item, widget)
+
+            self.messages_list.scrollToBottom()
 
         except Exception as e:
             logger.error(f"Ошибка загрузки чата {chat_id}: {e}")
-            self.text_browser.setHtml(f"<b style='color: red;'>Ошибка загрузки сообщений</b><br>{e}")
+            item = QListWidgetItem(f"Ошибка: {e}")
+            item.setFlags(Qt.NoItemFlags)
+            self.messages_list.addItem(item)
 
     def _refresh_messages(self):
         if not self.current_chat_id:
@@ -373,9 +486,16 @@ class ChatViewWidget(QWidget):
             read_by_other = get_read_messages(self.shared_folder, self.current_chat_id, self.current_other_fp)
             read_count = len(read_by_other)
 
-        if (self._last_msg_count != current_files or self._last_read_count != read_count):
+        deleted_ids = get_deleted_messages(self.shared_folder, self.current_chat_id, self.user.fp16)
+        deleted_count = len(deleted_ids)
+
+        if (self._last_msg_count != current_files or
+            self._last_read_count != read_count or
+            self._last_deleted_count != deleted_count):
+
             self._last_msg_count = current_files
             self._last_read_count = read_count
+            self._last_deleted_count = deleted_count
             self.load_chat(self.current_chat_id)
 
     def _update_status(self):
@@ -415,74 +535,6 @@ class ChatViewWidget(QWidget):
             from src.ui.group_settings_view import GroupSettingsView
             self.group_window = GroupSettingsView(self.shared_folder, self.user, self.current_chat_id)
             self.group_window.show()
-
-    def eventFilter(self, obj, event):
-        if obj is self.input_field and event.type() == QEvent.KeyPress:
-            if self.current_chat_id and self.current_other_fp:
-                set_typing(self.shared_folder, self.user.fp16, self.current_chat_id, True)
-                self.typing_timer.start(3000)
-
-            if event.matches(QKeySequence.Paste):
-                clipboard = QGuiApplication.clipboard()
-                if clipboard.mimeData().hasImage():
-                    image = clipboard.image()
-                    if not image.isNull():
-                        dialog = ImageConfirmDialog(image, self)
-                        if dialog.exec() == QDialog.Accepted:
-                            temp_dir = Path(tempfile.gettempdir())
-                            temp_path = temp_dir / "pygram_clipboard.png"
-                            image.save(str(temp_path), "PNG")
-
-                            try:
-                                send_file(
-                                    self.shared_folder, self.current_chat_id,
-                                    self.user.fp16, self.user.priv_pem, temp_path
-                                )
-                                self.load_chat(self.current_chat_id)
-                            except Exception as e:
-                                logger.error(f"Ошибка отправки скриншота: {e}")
-
-                            temp_path.unlink(missing_ok=True)
-                        return True
-        return super().eventFilter(obj, event)
-
-    def _on_anchor_clicked(self, url: QUrl):
-        path_str = url.toLocalFile()
-        if not path_str:
-            return
-
-        src_path = Path(path_str)
-        if not src_path.exists():
-            return
-
-        if getattr(sys, "frozen", False):
-            base_dir = Path(sys.executable).parent
-        else:
-            base_dir = Path(__file__).resolve().parent.parent.parent
-
-        download_dir = base_dir / "Downloads"
-
-        try:
-            download_dir.mkdir(parents=True, exist_ok=True)
-        except PermissionError:
-            download_dir = Path.home() / "Downloads" / "Pygram"
-            download_dir.mkdir(parents=True, exist_ok=True)
-
-        stored_name = src_path.name
-        if "_" in stored_name:
-            display_name = stored_name.split("_", 1)[1]
-        else:
-            display_name = stored_name
-
-        dest_path = download_dir / display_name
-
-        try:
-            if not dest_path.exists():
-                shutil.copy2(src_path, dest_path)
-
-            os.startfile(str(dest_path))
-        except Exception as e:
-            logger.error(f"Ошибка скачивания файла: {e}")
 
     def _on_attach_clicked(self):
         if not self.current_chat_id:

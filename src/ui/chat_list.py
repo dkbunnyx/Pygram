@@ -14,6 +14,7 @@ from src.core.chat_logic import list_user_chats, create_dm_chat, list_all_chats,
 from src.storage.local_db import LocalDB
 from src.core.crypto import unwrap_key, aes_decrypt, from_base64
 from src.storage.shared_store import load_chat_keys, load_chat_meta_enc
+from src.core.status import get_unread_count
 
 
 class ChatListWidget(QWidget):
@@ -143,6 +144,12 @@ class ChatListWidget(QWidget):
 
         elif chat_type == "admin_chat":
             display_name = "🛡 Админ-чат"
+
+        # --- СЧЕТЧИК НЕПРОЧИТАННЫХ ---
+        unread = get_unread_count(self.shared_folder, chat_id, self.user_fp16)
+        if unread > 0:
+            display_name = f"{display_name} ({unread})"
+        # ------------------------------
 
         text = f"{prefix}{display_name}"
         item = QListWidgetItem(text)
