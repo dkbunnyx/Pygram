@@ -353,42 +353,106 @@ class MainWindow(QMainWindow):
 
         if theme == "custom":
             bg_color = db.get_setting("color_bg", "#1a1a2e")
+            sidebar_bg = db.get_setting("color_sidebar_bg", "#1a1a1a")
+            chat_list_bg = db.get_setting("color_chat_list_bg", "#1a1a2e")
             chat_bg = db.get_setting("color_chat_bg", "#1a1a2e")
+            text_color = db.get_setting("color_text", "#cdd6f4")
+            btn_bg = db.get_setting("color_btn_bg", "#252538")
+            input_bg = db.get_setting("color_input_bg", "#252538")
 
-            # Красим всё окно
-            self.setStyleSheet(f"""
-                QMainWindow {{ background-color: {bg_color}; }}
-                QWidget#main_window_bg {{ background-color: {bg_color}; }}
-                #sidebar {{ background-color: {bg_color}; border-right: 1px solid #2a2a2a; }}
-                QListWidget {{ background-color: {bg_color}; border: none; }}
-            """)
-
-            # Красим фон списка сообщений напрямую
-            self.chat_view.messages_list.setStyleSheet(f"""
-                QListWidget {{
+            # 1. Глобальный стиль для всего приложения
+            QApplication.instance().setStyleSheet(f"""
+                QWidget {{
+                    background-color: {bg_color};
+                    color: {text_color};
+                }}
+                QLineEdit {{
+                    background-color: {input_bg};
+                    border: 1px solid #313148;
+                    border-radius: 8px;
+                    padding: 10px;
+                    color: {text_color};
+                }}
+                QPushButton {{
+                    background-color: {btn_bg};
+                    border: 1px solid #313148;
+                    border-radius: 8px;
+                    color: {text_color};
+                    padding: 10px;
+                    font-weight: bold;
+                }}
+                QPushButton:hover {{
+                    background-color: #313148;
+                }}
+                #sidebar {{
+                    background-color: {sidebar_bg};
+                    border-right: 1px solid #2a2a2a;
+                }}
+                QTextBrowser {{
                     background-color: {chat_bg};
                     border: none;
-                    outline: none;
                 }}
-                QListWidget::item {{ padding: 0px; margin: 0px; }}
-                QListWidget::item:selected {{ background: transparent; }}
+                QScrollBar:vertical {{
+                    background: {bg_color};
+                    width: 10px;
+                }}
+                QScrollBar::handle:vertical {{
+                    background: #313148;
+                    border-radius: 5px;
+                }}
             """)
+
+            # 2. Принудительно красим список чатов (он перебивает глобальный стиль)
+            self.chat_list.list_widget.setStyleSheet(f"""
+                QListWidget {{
+                    background-color: {chat_list_bg};
+                    border: none;
+                }}
+                QListWidget::item {{
+                    color: {text_color};
+                }}
+                QListWidget::item:hover {{
+                    background-color: #2a2a2a;
+                }}
+                QListWidget::item:selected {{
+                    background-color: #313148;
+                }}
+            """)
+
+            # 3. Принудительно красим сайдбар (он тоже перебивает)
+            self.sidebar.setStyleSheet(f"""
+                #sidebar {{
+                    background-color: {sidebar_bg};
+                    border-right: 1px solid #2a2a2a;
+                }}
+            """)
+
+            # 4. Принудительно красим кнопки в списке чатов (они внутри QWidget с bg_color)
+            for btn in self.chat_list.findChildren(QPushButton):
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: {btn_bg};
+                        color: {text_color};
+                        border: 1px solid #313148;
+                        border-radius: 8px;
+                        padding: 10px;
+                    }}
+                    QPushButton:hover {{
+                        background-color: #313148;
+                    }}
+                """)
 
             if self.chat_view.current_chat_id:
                 self.chat_view.load_chat(self.chat_view.current_chat_id)
         else:
-            self.setStyleSheet("")
-            self.centralWidget().setStyleSheet("")
-            self.sidebar.setStyleSheet("")
+            # Возвращаем базовую тему
+            from src.ui.theme import load_theme
+            load_theme(QApplication.instance(), "base")
+
             self.chat_list.list_widget.setStyleSheet("")
-            self.chat_view.messages_list.setStyleSheet("""
-                QListWidget {
-                    background-color: transparent;
-                    border: none;
-                    outline: none;
-                }
-                QListWidget::item { padding: 0px; margin: 0px; }
-                QListWidget::item:selected { background: transparent; }
-            """)
+            self.sidebar.setStyleSheet("")
+            for btn in self.chat_list.findChildren(QPushButton):
+                btn.setStyleSheet("")
+
             if self.chat_view.current_chat_id:
                 self.chat_view.load_chat(self.chat_view.current_chat_id)

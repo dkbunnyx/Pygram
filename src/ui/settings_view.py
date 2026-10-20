@@ -24,7 +24,7 @@ class SettingsView(QWidget):
 
     def _setup_ui(self):
         self.setWindowTitle("Настройки Pygram")
-        self.resize(600, 700)
+        self.resize(600, 850)  # Увеличили высоту, чтобы всё влезло
 
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
@@ -44,15 +44,25 @@ class SettingsView(QWidget):
         c_layout = QVBoxLayout(self.colors_widget)
         c_layout.setContentsMargins(0, 0, 0, 0)
 
-        c_layout.addWidget(QLabel("<b>Настройка цветов</b>"))
-        self.btn_bg = QPushButton("Цвет фона приложения (сайдбар, списки)")
+        c_layout.addWidget(QLabel("<b>Фоны</b>"))
+        self.btn_bg = QPushButton("Цвет фона приложения")
         self.btn_bg.clicked.connect(lambda: self._pick_color("color_bg", self.btn_bg))
         c_layout.addWidget(self.btn_bg)
 
-        self.btn_chat_bg = QPushButton("Цвет фона окна сообщений")
+        self.btn_sidebar_bg = QPushButton("Цвет сайдбара")
+        self.btn_sidebar_bg.clicked.connect(lambda: self._pick_color("color_sidebar_bg", self.btn_sidebar_bg))
+        c_layout.addWidget(self.btn_sidebar_bg)
+
+        self.btn_chat_list_bg = QPushButton("Цвет списка чатов")
+        self.btn_chat_list_bg.clicked.connect(lambda: self._pick_color("color_chat_list_bg", self.btn_chat_list_bg))
+        c_layout.addWidget(self.btn_chat_list_bg)
+
+        self.btn_chat_bg = QPushButton("Цвет окна сообщений")
         self.btn_chat_bg.clicked.connect(lambda: self._pick_color("color_chat_bg", self.btn_chat_bg))
         c_layout.addWidget(self.btn_chat_bg)
 
+        c_layout.addSpacing(10)
+        c_layout.addWidget(QLabel("<b>Элементы</b>"))
         self.btn_my = QPushButton("Цвет моих сообщений")
         self.btn_my.clicked.connect(lambda: self._pick_color("color_my_msg", self.btn_my))
         c_layout.addWidget(self.btn_my)
@@ -60,6 +70,18 @@ class SettingsView(QWidget):
         self.btn_other = QPushButton("Цвет сообщений собеседника")
         self.btn_other.clicked.connect(lambda: self._pick_color("color_other_msg", self.btn_other))
         c_layout.addWidget(self.btn_other)
+
+        self.btn_text_color = QPushButton("Цвет текста интерфейса")
+        self.btn_text_color.clicked.connect(lambda: self._pick_color("color_text", self.btn_text_color))
+        c_layout.addWidget(self.btn_text_color)
+
+        self.btn_btn_bg = QPushButton("Цвет фона кнопок")
+        self.btn_btn_bg.clicked.connect(lambda: self._pick_color("color_btn_bg", self.btn_btn_bg))
+        c_layout.addWidget(self.btn_btn_bg)
+
+        self.btn_input_bg = QPushButton("Цвет поля ввода")
+        self.btn_input_bg.clicked.connect(lambda: self._pick_color("color_input_bg", self.btn_input_bg))
+        c_layout.addWidget(self.btn_input_bg)
 
         self.colors_widget.setVisible(False)
         p_layout.addWidget(self.colors_widget)
@@ -148,6 +170,22 @@ class SettingsView(QWidget):
         self.spin_size.setValue(int(db.get_setting("font_size", "14")))
         self.input_btn_text.setText(db.get_setting("btn_text", "Отправить"))
         self.input_placeholder.setText(db.get_setting("placeholder", "Введите сообщение..."))
+
+        # Загружаем все цвета
+        color_keys = [
+            ("color_bg", "#1a1a2e", self.btn_bg),
+            ("color_sidebar_bg", "#1a1a1a", self.btn_sidebar_bg),
+            ("color_chat_list_bg", "#1a1a2e", self.btn_chat_list_bg),
+            ("color_chat_bg", "#1a1a2e", self.btn_chat_bg),
+            ("color_my_msg", "#4a90e2", self.btn_my),
+            ("color_other_msg", "#e2a04a", self.btn_other),
+            ("color_text", "#cdd6f4", self.btn_text_color),
+            ("color_btn_bg", "#252538", self.btn_btn_bg),
+            ("color_input_bg", "#252538", self.btn_input_bg),
+        ]
+
+        for key, default, btn in color_keys:
+            self._update_btn_color(btn, db.get_setting(key, default))
 
         theme = db.get_setting("theme", "base")
         self.combo_theme.setCurrentIndex(0 if theme == "base" else 1)
