@@ -73,6 +73,7 @@ class LoginView(QWidget):
         self.input_password = QLineEdit()
         self.input_password.setPlaceholderText("Пароль (мин. 8 символов)")
         self.input_password.setEchoMode(QLineEdit.Password)
+        self.input_password.returnPressed.connect(self._on_login_clicked)
         form_layout.addWidget(self.input_password)
 
         # Метка для вывода подсказок об ошибках

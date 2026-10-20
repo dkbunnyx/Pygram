@@ -19,7 +19,7 @@ from src.core.message import read_messages, send_message, send_file
 from src.core.chat_logic import get_chat_meta
 from src.core.crypto import unwrap_key, aes_decrypt, from_base64
 from src.storage.local_db import LocalDB
-from src.storage.shared_store import chat_files_dir, load_chat_keys, load_chat_meta_enc
+from src.storage.shared_store import chat_files_dir, chat_message_dir, load_chat_keys, load_chat_meta_enc
 from src.core.status import get_status, set_typing, mark_messages_read, get_read_messages
 
 
@@ -57,12 +57,21 @@ class ChatViewWidget(QWidget):
         self.user = user
         self.current_chat_id = None
         self.current_other_fp = None
+        self._last_msg_count = -1
+        self._last_read_count = -1
         self._setup_ui()
 
+        # Таймер статуса (в сети/печатает)
         self.status_timer = QTimer(self)
         self.status_timer.timeout.connect(self._update_status)
         self.status_timer.start(2000)
 
+        # Таймер обновления сообщений
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.timeout.connect(self._refresh_messages)
+        self.refresh_timer.start(2000)
+
+        # Таймер сброса "печатает"
         self.typing_timer = QTimer(self)
         self.typing_timer.setSingleShot(True)
         self.typing_timer.timeout.connect(self._stop_typing)
@@ -218,13 +227,13 @@ class ChatViewWidget(QWidget):
                 self.text_browser.setHtml("<i>Нет сообщений. Напишите первым!</i>")
                 return
 
-            # --- ОТМЕЧАЕМ СООБЩЕНИЯ КАК ПРОЧИТАННЫЕ ---
+            # Отмечаем сообщения от собеседника как прочитанные
             if self.current_other_fp:
                 incoming_ids = [m.msg_id for m in messages if m.sender_fp16 != self.user.fp16]
                 if incoming_ids:
                     mark_messages_read(self.shared_folder, chat_id, self.user.fp16, incoming_ids)
 
-            # Получаем список наших сообщений, прочитанных собеседником
+            # Получаем прочитанные нами сообщения (галочки)
             read_by_other = []
             if self.current_other_fp:
                 read_by_other = get_read_messages(self.shared_folder, chat_id, self.current_other_fp)
@@ -268,7 +277,7 @@ class ChatViewWidget(QWidget):
                 time_str = dt.strftime("%H:%M")
                 time_color = "#aaaaaa" if not is_me else "#dddddd"
 
-                # --- ГАЛОЧКИ ПРОЧТЕНИЯ ---
+                # Галочки
                 checkmark = ""
                 if is_me:
                     if msg.msg_id in read_by_other:
@@ -324,6 +333,26 @@ class ChatViewWidget(QWidget):
         except Exception as e:
             logger.error(f"Ошибка загрузки чата {chat_id}: {e}")
             self.text_browser.setHtml(f"<b style='color: red;'>Ошибка загрузки сообщений</b><br>{e}")
+
+    def _refresh_messages(self):
+        if not self.current_chat_id:
+            return
+
+        msg_dir = chat_message_dir(self.shared_folder, self.current_chat_id)
+        if not msg_dir.is_dir():
+            return
+
+        current_files = len(list(msg_dir.glob("*.bin")))
+
+        read_count = 0
+        if self.current_other_fp:
+            read_by_other = get_read_messages(self.shared_folder, self.current_chat_id, self.current_other_fp)
+            read_count = len(read_by_other)
+
+        if (self._last_msg_count != current_files or self._last_read_count != read_count):
+            self._last_msg_count = current_files
+            self._last_read_count = read_count
+            self.load_chat(self.current_chat_id)
 
     def _update_status(self):
         if not self.current_chat_id or not self.current_other_fp:
