@@ -4,11 +4,13 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QTabWidget, QPushButton, QComboBox, QLineEdit, QSpinBox,
     QColorDialog, QListWidget, QMessageBox, QListWidgetItem, QCheckBox,
+    QFrame, QFileDialog
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 
 from src.storage.local_db import LocalDB
+import os
 
 
 class SettingsView(QWidget):
@@ -24,6 +26,17 @@ class SettingsView(QWidget):
         self._setup_ui()
         self._load_settings()
 
+    def _add_separator(self, layout, text):
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        line.setStyleSheet("background-color: #313148;")
+
+        lbl = QLabel(f"<b>{text}</b>")
+        lbl.setStyleSheet("color: #89b4fa; margin-top: 10px; margin-bottom: 5px;")
+        layout.addWidget(lbl)
+        layout.addWidget(line)
+
     def _setup_ui(self):
         self.setWindowTitle("Настройки Pygram")
         self.resize(600, 900)
@@ -31,16 +44,80 @@ class SettingsView(QWidget):
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
 
-        # ---- Вкладка 1: Персонализация ----
-        self.tab_personal = QWidget()
-        p_layout = QVBoxLayout(self.tab_personal)
+        # ==================== ВКЛАДКА 1: ШРИФТЫ ====================
+        self.tab_fonts = QWidget()
+        f_layout = QVBoxLayout(self.tab_fonts)
 
-        p_layout.addWidget(QLabel("<b>Тема оформления</b>"))
+        self._add_separator(f_layout, "Настройки шрифта")
+
+        font_row = QHBoxLayout()
+        font_row.addWidget(QLabel("Шрифт:"))
+        self.combo_font = QComboBox()
+        self.combo_font.addItems(["Segoe UI", "Arial", "Times New Roman", "Courier New", "Verdana"])
+        font_row.addWidget(self.combo_font)
+
+        font_row.addWidget(QLabel("Размер:"))
+        self.spin_size = QSpinBox()
+        self.spin_size.setRange(10, 28)
+        font_row.addWidget(self.spin_size)
+        f_layout.addLayout(font_row)
+
+        self._add_separator(f_layout, "Оформление элементов")
+
+        f_layout.addWidget(QLabel("Текст кнопки 'Отправить':"))
+        self.input_btn_text = QLineEdit()
+        f_layout.addWidget(self.input_btn_text)
+
+        f_layout.addWidget(QLabel("Подсказка в поле ввода:"))
+        self.input_placeholder = QLineEdit()
+        f_layout.addWidget(self.input_placeholder)
+
+        f_layout.addWidget(QLabel("Эмодзи для кнопки чата:"))
+        emoji_row = QHBoxLayout()
+        self.btn_emoji_picker = QPushButton("😊")
+        self.btn_emoji_picker.setFixedSize(50, 40)
+        self.btn_emoji_picker.clicked.connect(self._on_pick_emoji)
+        emoji_row.addWidget(self.btn_emoji_picker)
+        emoji_row.addStretch()
+        f_layout.addLayout(emoji_row)
+
+        f_layout.addWidget(QLabel("Быстрая реакция (ЛКМ по сообщению):"))
+        quick_row = QHBoxLayout()
+        self.btn_quick_reaction = QPushButton("❤️")
+        self.btn_quick_reaction.setFixedSize(50, 40)
+        self.btn_quick_reaction.clicked.connect(self._on_pick_quick_reaction)
+        quick_row.addWidget(self.btn_quick_reaction)
+        quick_row.addStretch()
+        f_layout.addLayout(quick_row)
+
+        f_layout.addStretch()
+        self.tabs.addTab(self.tab_fonts, "🔤 Шрифты")
+
+        # ==================== ВКЛАДКА 2: КАСТОМИЗАЦИЯ ====================
+        self.tab_custom = QWidget()
+        c_main_layout = QVBoxLayout(self.tab_custom)
+
+        # --- Тема ---
+        self._add_separator(c_main_layout, "Тема оформления")
         self.combo_theme = QComboBox()
         self.combo_theme.addItems(["Основная (темная)", "Пользовательская"])
         self.combo_theme.currentTextChanged.connect(self._on_theme_changed)
-        p_layout.addWidget(self.combo_theme)
-        p_layout.addSpacing(10)
+        c_main_layout.addWidget(self.combo_theme)
+
+        # --- Фон чата ---
+        self._add_separator(c_main_layout, "Фон окна сообщений")
+        bg_image_layout = QHBoxLayout()
+        self.btn_bg_image = QPushButton("Установить картинку на фон")
+        self.btn_bg_image.clicked.connect(self._on_pick_bg_image)
+        bg_image_layout.addWidget(self.btn_bg_image)
+
+        self.btn_clear_bg_image = QPushButton("Убрать фон")
+        self.btn_clear_bg_image.clicked.connect(self._on_clear_bg_image)
+        bg_image_layout.addWidget(self.btn_clear_bg_image)
+        c_main_layout.addLayout(bg_image_layout)
+
+        # --- Цвета интерфейса (Пользовательские) ---
+        self._add_separator(c_main_layout, "Цвета интерфейса")
 
         self.colors_widget = QWidget()
         c_layout = QVBoxLayout(self.colors_widget)
@@ -52,18 +129,15 @@ class SettingsView(QWidget):
         c_layout.addWidget(self.btn_bg)
 
         self.btn_sidebar_bg = QPushButton("Цвет сайдбара")
-        self.btn_sidebar_bg.clicked.connect(
-            lambda: self._pick_color("color_sidebar_bg", self.btn_sidebar_bg))
+        self.btn_sidebar_bg.clicked.connect(lambda: self._pick_color("color_sidebar_bg", self.btn_sidebar_bg))
         c_layout.addWidget(self.btn_sidebar_bg)
 
         self.btn_chat_list_bg = QPushButton("Цвет списка чатов")
-        self.btn_chat_list_bg.clicked.connect(
-            lambda: self._pick_color("color_chat_list_bg", self.btn_chat_list_bg))
+        self.btn_chat_list_bg.clicked.connect(lambda: self._pick_color("color_chat_list_bg", self.btn_chat_list_bg))
         c_layout.addWidget(self.btn_chat_list_bg)
 
         self.btn_chat_bg = QPushButton("Цвет окна сообщений")
-        self.btn_chat_bg.clicked.connect(
-            lambda: self._pick_color("color_chat_bg", self.btn_chat_bg))
+        self.btn_chat_bg.clicked.connect(lambda: self._pick_color("color_chat_bg", self.btn_chat_bg))
         c_layout.addWidget(self.btn_chat_bg)
 
         c_layout.addSpacing(10)
@@ -73,76 +147,28 @@ class SettingsView(QWidget):
         c_layout.addWidget(self.btn_my)
 
         self.btn_other = QPushButton("Цвет сообщений собеседника")
-        self.btn_other.clicked.connect(
-            lambda: self._pick_color("color_other_msg", self.btn_other))
+        self.btn_other.clicked.connect(lambda: self._pick_color("color_other_msg", self.btn_other))
         c_layout.addWidget(self.btn_other)
 
         self.btn_text_color = QPushButton("Цвет текста интерфейса")
-        self.btn_text_color.clicked.connect(
-            lambda: self._pick_color("color_text", self.btn_text_color))
+        self.btn_text_color.clicked.connect(lambda: self._pick_color("color_text", self.btn_text_color))
         c_layout.addWidget(self.btn_text_color)
 
         self.btn_btn_bg = QPushButton("Цвет фона кнопок")
-        self.btn_btn_bg.clicked.connect(
-            lambda: self._pick_color("color_btn_bg", self.btn_btn_bg))
+        self.btn_btn_bg.clicked.connect(lambda: self._pick_color("color_btn_bg", self.btn_btn_bg))
         c_layout.addWidget(self.btn_btn_bg)
 
         self.btn_input_bg = QPushButton("Цвет поля ввода")
-        self.btn_input_bg.clicked.connect(
-            lambda: self._pick_color("color_input_bg", self.btn_input_bg))
+        self.btn_input_bg.clicked.connect(lambda: self._pick_color("color_input_bg", self.btn_input_bg))
         c_layout.addWidget(self.btn_input_bg)
 
         self.colors_widget.setVisible(False)
-        p_layout.addWidget(self.colors_widget)
-        p_layout.addSpacing(10)
+        c_main_layout.addWidget(self.colors_widget)
 
-        p_layout.addWidget(QLabel("<b>Настройки шрифта</b>"))
-        font_row = QHBoxLayout()
-        font_row.addWidget(QLabel("Шрифт:"))
-        self.combo_font = QComboBox()
-        self.combo_font.addItems(
-            ["Segoe UI", "Arial", "Times New Roman", "Courier New", "Verdana"]
-        )
-        font_row.addWidget(self.combo_font)
+        c_main_layout.addStretch()
+        self.tabs.addTab(self.tab_custom, "🎨 Кастомизация")
 
-        font_row.addWidget(QLabel("Размер:"))
-        self.spin_size = QSpinBox()
-        self.spin_size.setRange(10, 28)
-        font_row.addWidget(self.spin_size)
-        p_layout.addLayout(font_row)
-        p_layout.addSpacing(10)
-
-        p_layout.addWidget(QLabel("<b>Оформление</b>"))
-        p_layout.addWidget(QLabel("Текст кнопки 'Отправить':"))
-        self.input_btn_text = QLineEdit()
-        p_layout.addWidget(self.input_btn_text)
-
-        p_layout.addWidget(QLabel("Подсказка в поле ввода:"))
-        self.input_placeholder = QLineEdit()
-        p_layout.addWidget(self.input_placeholder)
-
-        p_layout.addWidget(QLabel("Эмодзи для кнопки чата:"))
-        emoji_row = QHBoxLayout()
-        self.btn_emoji_picker = QPushButton("😊")
-        self.btn_emoji_picker.setFixedSize(50, 40)
-        self.btn_emoji_picker.clicked.connect(self._on_pick_emoji)
-        emoji_row.addWidget(self.btn_emoji_picker)
-        emoji_row.addStretch()
-        p_layout.addLayout(emoji_row)
-
-        p_layout.addWidget(QLabel("Быстрая реакция (ЛКМ по сообщению):"))
-        quick_row = QHBoxLayout()
-        self.btn_quick_reaction = QPushButton("❤️")
-        self.btn_quick_reaction.setFixedSize(50, 40)
-        self.btn_quick_reaction.clicked.connect(self._on_pick_quick_reaction)
-        quick_row.addWidget(self.btn_quick_reaction)
-        quick_row.addStretch()
-        p_layout.addLayout(quick_row)
-
-        p_layout.addStretch()
-        self.tabs.addTab(self.tab_personal, "🎨 Персонализация")
-
-        # ---- Вкладка 2: Конфиденциальность ----
+        # ==================== ВКЛАДКА 3: КОНФИДЕНЦИАЛЬНОСТЬ ====================
         self.tab_privacy = QWidget()
         priv_layout = QVBoxLayout(self.tab_privacy)
 
@@ -170,7 +196,7 @@ class SettingsView(QWidget):
         priv_layout.addStretch()
         self.tabs.addTab(self.tab_privacy, "🔒 Конфиденциальность")
 
-        # ---- Вкладка 3: Аккаунты ----
+        # ==================== ВКЛАДКА 4: АККАУНТЫ ====================
         self.tab_accounts = QWidget()
         a_layout = QVBoxLayout(self.tab_accounts)
         a_layout.addWidget(QLabel("<b>Активные аккаунты (до 3)</b>"))
@@ -193,9 +219,7 @@ class SettingsView(QWidget):
         layout.addWidget(self.tabs)
 
         btn_save = QPushButton("Сохранить настройки")
-        btn_save.setStyleSheet(
-            "background-color: #4a90e2; color: white; padding: 10px; font-weight: bold;"
-        )
+        btn_save.setStyleSheet("background-color: #4a90e2; color: white; padding: 10px; font-weight: bold;")
         btn_save.clicked.connect(self._on_save)
         layout.addWidget(btn_save)
 
@@ -208,11 +232,16 @@ class SettingsView(QWidget):
 
     def _load_settings(self):
         db = LocalDB()
+
+        # Шрифты
         self.combo_font.setCurrentText(db.get_setting("font_family", "Segoe UI"))
         self.spin_size.setValue(int(db.get_setting("font_size", "14")))
         self.input_btn_text.setText(db.get_setting("btn_text", "Отправить"))
         self.input_placeholder.setText(db.get_setting("placeholder", "Введите сообщение..."))
+        self.btn_emoji_picker.setText(db.get_setting("emoji_button", "😊"))
+        self.btn_quick_reaction.setText(db.get_setting("quick_reaction", "❤️"))
 
+        # Кастомизация
         color_keys = [
             ("color_bg", "#1a1a2e", self.btn_bg),
             ("color_sidebar_bg", "#1a1a1a", self.btn_sidebar_bg),
@@ -231,14 +260,16 @@ class SettingsView(QWidget):
         self.combo_theme.setCurrentIndex(0 if theme == "base" else 1)
         self._on_theme_changed(self.combo_theme.currentText())
 
-        self.btn_emoji_picker.setText(db.get_setting("emoji_button", "😊"))
-        self.btn_quick_reaction.setText(db.get_setting("quick_reaction", "❤️"))
+        bg_img = db.get_setting("chat_bg_image", "")
+        if bg_img and os.path.exists(bg_img):
+            self.btn_bg_image.setText("✅ Фон установлен (нажмите, чтобы изменить)")
+        else:
+            self.btn_bg_image.setText("Установить картинку на фон")
 
         # Конфиденциальность
-        self.chk_hide_last_seen.setChecked(
-            db.get_setting("hide_last_seen", "0") == "1"
-        )
+        self.chk_hide_last_seen.setChecked(db.get_setting("hide_last_seen", "0") == "1")
 
+        # Аккаунты
         self.accounts_list.clear()
         for acc in self.account_manager.accounts:
             prefix = "👉 " if acc.fp16 == self.user.fp16 else "    "
@@ -247,9 +278,9 @@ class SettingsView(QWidget):
             self.accounts_list.addItem(item)
 
     def _update_btn_color(self, button, color_hex):
-        button.setStyleSheet(
-            f"background-color: {color_hex}; color: white; padding: 5px;"
-        )
+        qcolor = QColor(color_hex)
+        text_color = "black" if qcolor.lightness() > 128 else "white"
+        button.setStyleSheet(f"background-color: {color_hex}; color: {text_color}; padding: 5px; border-radius: 4px;")
 
     def _pick_color(self, setting_key: str, button):
         db = LocalDB()
@@ -260,13 +291,24 @@ class SettingsView(QWidget):
             db.set_setting(setting_key, hex_color)
             self._update_btn_color(button, hex_color)
 
+    def _on_pick_bg_image(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Выберите фоновое изображение", "", "Images (*.png *.jpg *.jpeg *.bmp)")
+        if file_path:
+            db = LocalDB()
+            db.set_setting("chat_bg_image", file_path)
+            self.btn_bg_image.setText("✅ Фон установлен (нажмите, чтобы изменить)")
+
+    def _on_clear_bg_image(self):
+        db = LocalDB()
+        db.set_setting("chat_bg_image", "")
+        self.btn_bg_image.setText("Установить картинку на фон")
+        QMessageBox.information(self, "Успех", "Фон окна сообщений убран")
+
     def _on_pick_emoji(self):
         from src.ui.widgets.emoji_picker import EmojiPicker
         picker = EmojiPicker()
         picker.emoji_selected.connect(self._set_emoji_button)
-        pos = self.btn_emoji_picker.mapToGlobal(
-            self.btn_emoji_picker.rect().bottomLeft()
-        )
+        pos = self.btn_emoji_picker.mapToGlobal(self.btn_emoji_picker.rect().bottomLeft())
         picker.move(pos)
         picker.show()
 
@@ -277,9 +319,7 @@ class SettingsView(QWidget):
         from src.ui.widgets.emoji_picker import EmojiPicker
         picker = EmojiPicker()
         picker.emoji_selected.connect(self._set_quick_reaction)
-        pos = self.btn_quick_reaction.mapToGlobal(
-            self.btn_quick_reaction.rect().bottomLeft()
-        )
+        pos = self.btn_quick_reaction.mapToGlobal(self.btn_quick_reaction.rect().bottomLeft())
         picker.move(pos)
         picker.show()
 
@@ -291,21 +331,14 @@ class SettingsView(QWidget):
         db.set_setting("font_family", self.combo_font.currentText())
         db.set_setting("font_size", str(self.spin_size.value()))
         db.set_setting("btn_text", self.input_btn_text.text() or "Отправить")
-        db.set_setting(
-            "placeholder", self.input_placeholder.text() or "Введите сообщение..."
-        )
+        db.set_setting("placeholder", self.input_placeholder.text() or "Введите сообщение...")
         db.set_setting("emoji_button", self.btn_emoji_picker.text())
         db.set_setting("quick_reaction", self.btn_quick_reaction.text())
 
-        theme_str = (
-            "custom" if "Пользовательская" in self.combo_theme.currentText() else "base"
-        )
+        theme_str = "custom" if "Пользовательская" in self.combo_theme.currentText() else "base"
         db.set_setting("theme", theme_str)
 
-        # Конфиденциальность
-        db.set_setting(
-            "hide_last_seen", "1" if self.chk_hide_last_seen.isChecked() else "0"
-        )
+        db.set_setting("hide_last_seen", "1" if self.chk_hide_last_seen.isChecked() else "0")
 
         self.settings_changed.emit()
         self.close()
@@ -315,9 +348,7 @@ class SettingsView(QWidget):
         self.close()
 
     def _on_logout(self):
-        reply = QMessageBox.question(
-            self, "Выход", f"Выйти из аккаунта {self.user.login}?"
-        )
+        reply = QMessageBox.question(self, "Выход", f"Выйти из аккаунта {self.user.login}?")
         if reply == QMessageBox.Yes:
             self.logout_requested.emit()
             self.close()

@@ -86,7 +86,7 @@ class MainWindow(QMainWindow):
         # Периодическое обновление списка чатов (уведомления)
         self.notification_timer = QTimer(self)
         self.notification_timer.timeout.connect(self.chat_list.refresh_chats)
-        self.notification_timer.start(3000)  # было 5000 — ускорили
+        self.notification_timer.start(3000)
 
     def _on_chat_selected(self, chat_id: str):
         self.chat_view.load_chat(chat_id)
@@ -192,7 +192,7 @@ class MainWindow(QMainWindow):
             self.btn_admin.setStyleSheet("")
 
     # ========================================================================
-    # Админ-панель (расширенная)
+    # Админ-панель
     # ========================================================================
 
     def _open_admins_panel(self):
@@ -417,11 +417,6 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(dialog, "Ошибка", str(e))
 
     def _force_logout_user(self, fp: str, login: str, dialog, refresh_callback):
-        """Принудительно завершает локальные сессии пользователя.
-
-        Работает только если админ на той же машине (сессии локальны).
-        Полезно как «мягкий бан» на текущем ПК.
-        """
         from src.os_integration.win import get_local_dir
         try:
             session_path = get_local_dir() / f".session_{fp}"
@@ -442,16 +437,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(dialog, "Ошибка", str(e))
 
     def _show_user_info(self, fp: str, login: str, dialog):
-        """Показывает инфо о пользователе."""
-        from src.storage.shared_store import (
-            load_login_marker, load_pub_key_by_fp16,
-        )
+        from src.storage.shared_store import load_pub_key_by_fp16
         from src.core.status import get_status
         from src.core.crypto import fingerprint
         try:
             pub = load_pub_key_by_fp16(self.config.shared_folder, fp)
             full_fp = fingerprint(pub)
-            # статус от имени админа (видит реальный last_seen)
             status = get_status(
                 self.config.shared_folder, fp,
                 viewer_fp16=self.user.fp16, viewer_is_admin=True,
@@ -567,7 +558,6 @@ class MainWindow(QMainWindow):
         self.chat_view.input_field.setPlaceholderText(placeholder)
         self.chat_view.btn_emoji.setText(emoji_btn)
 
-        # Применяем конфиденциальность
         hide_last_seen = db.get_setting("hide_last_seen", "0") == "1"
         set_online(
             self.config.shared_folder, self.user.fp16, True,
@@ -584,44 +574,85 @@ class MainWindow(QMainWindow):
             text_color = db.get_setting("color_text", "#cdd6f4")
             btn_bg = db.get_setting("color_btn_bg", "#252538")
             input_bg = db.get_setting("color_input_bg", "#252538")
+            my_msg_bg = db.get_setting("color_my_msg", "#4a90e2")
+            other_msg_bg = db.get_setting("color_other_msg", "#e2a04a")
 
             QApplication.instance().setStyleSheet(f"""
-                QWidget {{ background-color: {bg_color}; color: {text_color}; }}
+                QWidget {{
+                    background-color: {bg_color};
+                    color: {text_color};
+                }}
                 QLineEdit {{
-                    background-color: {input_bg}; border: 1px solid #313148;
-                    border-radius: 8px; padding: 10px; color: {text_color};
+                    background-color: {input_bg};
+                    border: 1px solid #313148;
+                    border-radius: 8px;
+                    padding: 10px;
+                    color: {text_color};
                 }}
                 QPushButton {{
-                    background-color: {btn_bg}; border: 1px solid #313148;
-                    border-radius: 8px; color: {text_color}; padding: 10px;
+                    background-color: {btn_bg};
+                    border: 1px solid #313148;
+                    border-radius: 8px;
+                    color: {text_color};
+                    padding: 10px;
                     font-weight: bold;
                 }}
-                QPushButton:hover {{ background-color: #313148; }}
-                #sidebar {{ background-color: {sidebar_bg}; border-right: 1px solid #2a2a2a; }}
-                QTextBrowser {{ background-color: {chat_bg}; border: none; }}
-                QScrollBar:vertical {{ background: {bg_color}; width: 10px; }}
-                QScrollBar::handle:vertical {{ background: #313148; border-radius: 5px; }}
+                QPushButton:hover {{
+                    background-color: #313148;
+                }}
+                QTextBrowser {{
+                    background-color: {chat_bg};
+                    border: none;
+                }}
+                QScrollBar:vertical {{
+                    background: {bg_color};
+                    width: 10px;
+                }}
+                QScrollBar::handle:vertical {{
+                    background: #313148;
+                    border-radius: 5px;
+                }}
             """)
 
             self.chat_list.list_widget.setStyleSheet(f"""
-                QListWidget {{ background-color: {chat_list_bg}; border: none; }}
-                QListWidget::item {{ color: {text_color}; }}
-                QListWidget::item:hover {{ background-color: #2a2a2a; }}
-                QListWidget::item:selected {{ background-color: #313148; }}
+                QListWidget {{
+                    background-color: {chat_list_bg};
+                    border: none;
+                }}
+                QListWidget::item {{
+                    color: {text_color};
+                }}
+                QListWidget::item:hover {{
+                    background-color: #2a2a2a;
+                }}
+                QListWidget::item:selected {{
+                    background-color: #313148;
+                }}
             """)
 
             self.sidebar.setStyleSheet(f"""
-                #sidebar {{ background-color: {sidebar_bg}; border-right: 1px solid #2a2a2a; }}
+                #sidebar {{
+                    background-color: {sidebar_bg};
+                    border-right: 1px solid #2a2a2a;
+                }}
             """)
 
             for btn in self.chat_list.findChildren(QPushButton):
                 btn.setStyleSheet(f"""
                     QPushButton {{
-                        background-color: {btn_bg}; color: {text_color};
-                        border: 1px solid #313148; border-radius: 8px; padding: 10px;
+                        background-color: {btn_bg};
+                        color: {text_color};
+                        border: 1px solid #313148;
+                        border-radius: 8px;
+                        padding: 10px;
                     }}
-                    QPushButton:hover {{ background-color: #313148; }}
+                    QPushButton:hover {{
+                        background-color: #313148;
+                    }}
                 """)
+
+            self.chat_view.my_msg_bg = my_msg_bg
+            self.chat_view.other_msg_bg = other_msg_bg
 
             if self.chat_view.current_chat_id:
                 self.chat_view.load_chat(self.chat_view.current_chat_id)
@@ -634,5 +665,13 @@ class MainWindow(QMainWindow):
             for btn in self.chat_list.findChildren(QPushButton):
                 btn.setStyleSheet("")
 
+            self.chat_view.my_msg_bg = "#4a90e2"
+            self.chat_view.other_msg_bg = "#e2a04a"
+
             if self.chat_view.current_chat_id:
                 self.chat_view.load_chat(self.chat_view.current_chat_id)
+
+        # Применяем фон чата
+        self.chat_view._apply_chat_background()
+        if self.chat_view.current_chat_id:
+            self.chat_view.load_chat(self.chat_view.current_chat_id)

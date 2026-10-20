@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QLabel, QFileDialog, QMessageBox, QMenu
 )
 from PySide6.QtCore import Qt, QUrl, QEvent, QTimer, QThread, Signal
-from PySide6.QtGui import QDesktopServices, QKeySequence, QPixmap, QGuiApplication
+from PySide6.QtGui import QDesktopServices, QKeySequence, QPixmap, QGuiApplication, QPainter
 from loguru import logger
 import tempfile
 import time
@@ -33,6 +33,53 @@ from src.ui.widgets.emoji_picker import EmojiPicker
 from src.ui.widgets.message_widget import MessageWidget
 
 
+# ============================================================================
+# КАСТОМНЫЙ СПИСОК С НЕПОДВИЖНЫМ ФОНОМ
+# ============================================================================
+class ChatMessagesList(QListWidget):
+    """Кастомный QListWidget, который рисует неподвижный фон."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.bg_pixmap = None
+        self.setStyleSheet("""
+            QListWidget { background-color: transparent; border: none; outline: none; }
+            QListWidget::item { padding: 0px; margin: 0px; }
+            QListWidget::item:selected { background: transparent; }
+        """)
+        self.setSelectionMode(QListWidget.NoSelection)
+        self.setVerticalScrollMode(QListWidget.ScrollPerPixel)
+
+    def set_background_image(self, image_path: str):
+        if image_path and os.path.exists(image_path):
+            self.bg_pixmap = QPixmap(image_path)
+        else:
+            self.bg_pixmap = None
+        self.viewport().update()
+
+    def paintEvent(self, event):
+        if self.bg_pixmap:
+            painter = QPainter(self.viewport())
+
+            # Масштабируем картинку под размер окна (с сохранением пропорций)
+            scaled = self.bg_pixmap.scaled(
+                self.viewport().size(),
+                Qt.KeepAspectRatioByExpanding,
+                Qt.SmoothTransformation
+            )
+
+            # Центрируем
+            x = (self.viewport().width() - scaled.width()) // 2
+            y = (self.viewport().height() - scaled.height()) // 2
+            painter.drawPixmap(x, y, scaled)
+            painter.end()
+
+        super().paintEvent(event)
+
+
+# ============================================================================
+# ФОНОВЫЕ ПОТОКИ
+# ============================================================================
 class SendWorker(QThread):
     finished = Signal(bool, str, str)
 
@@ -148,6 +195,9 @@ class ImageConfirmDialog(QDialog):
         layout.addLayout(btn_layout)
 
 
+# ============================================================================
+# ОСНОВНОЙ ВИДЖЕТ ЧАТА
+# ============================================================================
 class ChatViewWidget(QWidget):
     def __init__(self, shared_folder: str | Path, user, parent=None):
         super().__init__(parent)
@@ -163,11 +213,15 @@ class ChatViewWidget(QWidget):
         self._load_worker = None
         self._active_workers = []
 
-        # Режим выделения сообщений
         self.selection_mode = False
         self.selected_msg_ids = set()
 
+        self.my_msg_bg = "#4a90e2"
+        self.other_msg_bg = "#e2a04a"
+
         self._setup_ui()
+
+        self._apply_chat_background()
 
         self.emoji_picker = EmojiPicker()
         self.emoji_picker.emoji_selected.connect(self._insert_emoji)
@@ -218,14 +272,8 @@ class ChatViewWidget(QWidget):
 
         layout.addWidget(self.header_widget)
 
-        self.messages_list = QListWidget()
+        self.messages_list = ChatMessagesList()
         self.messages_list.setObjectName("messages_list")
-        self.messages_list.setStyleSheet("""
-            QListWidget { background-color: transparent; border: none; outline: none; }
-            QListWidget::item { padding: 0px; margin: 0px; }
-            QListWidget::item:selected { background: transparent; }
-        """)
-        self.messages_list.setSelectionMode(QListWidget.NoSelection)
         layout.addWidget(self.messages_list)
 
         # --- ПАНЕЛЬ РЕЖИМА ВЫДЕЛЕНИЯ ---
@@ -251,7 +299,6 @@ class ChatViewWidget(QWidget):
 
         layout.addWidget(self.selection_bar)
         self.selection_bar.setVisible(False)
-        # --------------------------------
 
         self.input_widget = QWidget()
         self.input_widget.setFixedHeight(60)
@@ -286,6 +333,15 @@ class ChatViewWidget(QWidget):
         layout.addWidget(self.input_widget)
         self.input_widget.setVisible(False)
 
+    def _apply_chat_background(self):
+        db = LocalDB()
+        bg_image_path = db.get_setting("chat_bg_image", "")
+
+        if bg_image_path and os.path.exists(bg_image_path):
+            self.messages_list.set_background_image(bg_image_path)
+        else:
+            self.messages_list.set_background_image("")
+
     def eventFilter(self, obj, event):
         if obj is self.input_field and event.type() == QEvent.KeyPress:
             if self.current_chat_id and self.current_other_fp:
@@ -314,24 +370,19 @@ class ChatViewWidget(QWidget):
                         return True
         return super().eventFilter(obj, event)
 
-    # ========================================================================
-    # ВЫДЕЛЕНИЕ И УДАЛЕНИЕ
-    # ========================================================================
-
     def _enter_selection_mode(self):
         self.selection_mode = True
         self.selected_msg_ids.clear()
         self.selection_bar.setVisible(True)
-        self.input_widget.setVisible(False)  # Скрываем поле ввода
+        self.input_widget.setVisible(False)
         self._update_selection_ui()
 
     def _exit_selection_mode(self):
         self.selection_mode = False
         self.selected_msg_ids.clear()
         self.selection_bar.setVisible(False)
-        self.input_widget.setVisible(True)  # Показываем поле ввода
+        self.input_widget.setVisible(True)
 
-        # Снимаем выделение со всех виджетов
         for i in range(self.messages_list.count()):
             w = self.messages_list.itemWidget(self.messages_list.item(i))
             if isinstance(w, MessageWidget):
@@ -346,7 +397,6 @@ class ChatViewWidget(QWidget):
         else:
             self.selected_msg_ids.add(msg_id)
 
-        # Обновляем визуально
         for i in range(self.messages_list.count()):
             item = self.messages_list.item(i)
             w = self.messages_list.itemWidget(item)
@@ -383,16 +433,11 @@ class ChatViewWidget(QWidget):
                     msg_id, self.user.fp16, for_everyone
                 )
 
-            # Выходим из режима и перезагружаем чат
             self._exit_selection_mode()
             self.load_chat(self.current_chat_id)
 
         except Exception as e:
             QMessageBox.warning(self, "Ошибка", f"Не удалось удалить: {e}")
-
-    # ========================================================================
-    # Эмодзи / Реакции / Клики
-    # ========================================================================
 
     def _on_emoji_clicked(self):
         pos = self.btn_emoji.mapToGlobal(self.btn_emoji.rect().topLeft())
@@ -474,7 +519,6 @@ class ChatViewWidget(QWidget):
         action_all = menu.addAction("Все реакции...")
         action_all.triggered.connect(lambda: self._open_reaction_picker(msg_id))
 
-        # КНОПКА ВЫБОРА
         menu.addSeparator()
         action_select = menu.addAction("☑️ Выбрать")
         action_select.triggered.connect(lambda: self._enter_selection_mode_and_select(msg_id))
@@ -482,7 +526,6 @@ class ChatViewWidget(QWidget):
         menu.exec(self.cursor().pos())
 
     def _enter_selection_mode_and_select(self, msg_id):
-        """Включает режим выделения и сразу выбирает первое сообщение."""
         self._enter_selection_mode()
         self._toggle_message_selection(msg_id)
 
@@ -517,10 +560,6 @@ class ChatViewWidget(QWidget):
     def _remove_reaction(self, msg_id: str):
         set_reaction(self.shared_folder, self.current_chat_id, msg_id, self.user.fp16, None)
         self.load_chat(self.current_chat_id)
-
-    # ========================================================================
-    # Рендер
-    # ========================================================================
 
     def _create_message_widget(self, msg, read_by_other, profile_dir, font_size):
         db = LocalDB()
@@ -588,7 +627,6 @@ class ChatViewWidget(QWidget):
         widget.clicked.connect(self._on_message_clicked)
         widget.double_clicked.connect(self._on_message_double_clicked)
 
-        # Если сообщение уже было выбрано (при перерисовке)
         if msg.msg_id in self.selected_msg_ids:
             widget.set_selected(True, font_size)
 
@@ -597,17 +635,12 @@ class ChatViewWidget(QWidget):
         self.messages_list.addItem(item)
         self.messages_list.setItemWidget(item, widget)
 
-    # ========================================================================
-    # Загрузка (МГНОВЕННАЯ)
-    # ========================================================================
-
     def load_chat(self, chat_id: str):
         self.current_chat_id = chat_id
         self.messages_list.clear()
         self._rendered_msg_ids.clear()
         self._rendered_file_count = 0
 
-        # Сбрасываем режим выбора при переходе на другой чат
         if self.selection_mode:
             self._exit_selection_mode()
 
@@ -673,7 +706,6 @@ class ChatViewWidget(QWidget):
 
         def on_loaded(result: dict):
             db.save_chat_cache(chat_id, result["chat_type"], result["title"])
-
             self.label_title.setText(result["title"])
 
             if result["chat_type"] == "dm":
