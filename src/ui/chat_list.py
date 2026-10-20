@@ -32,6 +32,9 @@ class ChatListWidget(QWidget):
         self.user_is_admin = user_is_admin
         self.profile_dir = Path(shared_folder) / ".profiles"
         self._last_unread = {}
+        # ID чата, который сейчас открыт в ChatViewWidget.
+        # Для него счётчик и уведомления не показываются.
+        self.current_open_chat_id: str | None = None
         self._setup_ui()
         self.refresh_chats()
 
@@ -94,7 +97,7 @@ class ChatListWidget(QWidget):
                 self._check_new_messages(chats)
 
             if self.user_is_admin:
-                header_all = QListWidgetItem("СПИСОК ВСЕХ ЧАТОВ (АДМИН)")
+                header_all = QListWidgetItem("СПИСОК ВСЕХ ЧАТОВ: ")
                 header_all.setFlags(Qt.NoItemFlags)
                 header_all.setForeground(QColor("gray"))
                 self.list_widget.addItem(header_all)
@@ -154,8 +157,8 @@ class ChatListWidget(QWidget):
         elif chat_type == "admin_chat":
             display_name = "🛡 Админ-чат"
 
-        # Счетчик непрочитанных (только если show_unread=True)
-        if show_unread:
+        # Счетчик непрочитанных: только если show_unread=True И чат не открыт сейчас
+        if show_unread and chat_id != self.current_open_chat_id:
             unread = get_unread_count(self.shared_folder, chat_id, self.user_fp16)
             if unread > 0:
                 display_name = f"{display_name} ({unread})"
@@ -178,6 +181,11 @@ class ChatListWidget(QWidget):
 
             old_count = self._last_unread.get(chat_id, 0)
             if unread > old_count:
+                # Не показываем уведомление, если этот чат сейчас открыт
+                if chat_id == self.current_open_chat_id:
+                    self._last_unread[chat_id] = unread
+                    continue
+
                 chat_type = chat["type"]
                 if chat_type == "dm":
                     parts = chat_id.replace("dm_", "").split("__")

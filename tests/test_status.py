@@ -9,7 +9,7 @@ from src.core.status import (
     delete_message, get_deleted_messages,
     get_unread_count,
 )
-from src.storage.shared_store import ensure_shared_structure
+from src.storage.shared_store import ensure_shared_structure, chat_message_dir
 
 
 @pytest.fixture
@@ -118,13 +118,11 @@ class TestDelete:
 
     def test_delete_for_self_not_other(self, shared):
         delete_message(shared, "chat1", "msg1", "a" * 16, for_everyone=False)
-        # Для другого пользователя — не удалено
         deleted = get_deleted_messages(shared, "chat1", "b" * 16)
         assert "msg1" not in deleted
 
     def test_delete_for_everyone(self, shared):
         delete_message(shared, "chat1", "msg1", "a" * 16, for_everyone=True)
-        # Для всех
         assert "msg1" in get_deleted_messages(shared, "chat1", "a" * 16)
         assert "msg1" in get_deleted_messages(shared, "chat1", "b" * 16)
 
@@ -134,35 +132,39 @@ class TestDelete:
 # ============================================================================
 
 class TestUnread:
+    def _make_msg(self, shared, chat_id: str, sender_fp16: str, ts: int = 1700000000000, uuid8: str = "c" * 8) -> str:
+        """Хелпер: создаёт .bin файл с корректным msg_id и возвращает msg_id."""
+        msg_dir = chat_message_dir(shared, chat_id)
+        msg_dir.mkdir(parents=True, exist_ok=True)
+        msg_id = f"{ts}_{sender_fp16}_{uuid8}"
+        (msg_dir / f"{msg_id}.bin").write_text("{}")
+        return msg_id
+
     def test_empty(self, shared):
         assert get_unread_count(shared, "chat1", "a" * 16) == 0
 
-    def test_unread(self, shared, tmp_path):
-        # Создаём фейковый .bin файл
-        from src.storage.shared_store import chat_message_dir
-        msg_dir = chat_message_dir(shared, "chat1")
-        msg_dir.mkdir(parents=True, exist_ok=True)
-        (msg_dir / "123_b16_uuid.bin").write_text("{}")
-
-        count = get_unread_count(shared, "chat1", "a" * 16)
-        assert count == 1
+    def test_unread(self, shared):
+        self._make_msg(shared, "chat1", "b" * 16)
+        assert get_unread_count(shared, "chat1", "a" * 16) == 1
 
     def test_read_not_counted(self, shared):
-        from src.storage.shared_store import chat_message_dir
-        msg_dir = chat_message_dir(shared, "chat1")
-        msg_dir.mkdir(parents=True, exist_ok=True)
-        (msg_dir / "123_b16_uuid.bin").write_text("{}")
-
-        mark_messages_read(shared, "chat1", "a" * 16, ["123_b16_uuid"])
-        count = get_unread_count(shared, "chat1", "a" * 16)
-        assert count == 0
+        msg_id = self._make_msg(shared, "chat1", "b" * 16)
+        mark_messages_read(shared, "chat1", "a" * 16, [msg_id])
+        assert get_unread_count(shared, "chat1", "a" * 16) == 0
 
     def test_own_not_counted(self, shared):
-        from src.storage.shared_store import chat_message_dir
+        self._make_msg(shared, "chat1", "a" * 16)
+        assert get_unread_count(shared, "chat1", "a" * 16) == 0
+
+    def test_malformed_msg_id_ignored(self, shared):
+        """Битые msg_id не должны залипать в счётчике."""
         msg_dir = chat_message_dir(shared, "chat1")
         msg_dir.mkdir(parents=True, exist_ok=True)
-        (msg_dir / f"123_{'a' * 16}_uuid.bin").write_text("{}")
+        (msg_dir / "garbage.bin").write_text("{}")
+        assert get_unread_count(shared, "chat1", "a" * 16) == 0
 
-        # Это наше сообщение — не считается
-        count = get_unread_count(shared, "chat1", "a" * 16)
-        assert count == 0
+    def test_multiple_unread(self, shared):
+        self._make_msg(shared, "chat1", "b" * 16, ts=1700000000001)
+        self._make_msg(shared, "chat1", "b" * 16, ts=1700000000002)
+        self._make_msg(shared, "chat1", "b" * 16, ts=1700000000003)
+        assert get_unread_count(shared, "chat1", "a" * 16) == 3

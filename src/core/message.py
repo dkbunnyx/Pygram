@@ -6,6 +6,7 @@ import json
 import time
 import uuid
 import shutil
+import io
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +21,12 @@ from src.storage.shared_store import (
     chat_message_dir, chat_files_dir, load_chat_keys, load_chat_meta, load_chat_meta_enc,
     load_pub_key_by_fp16, write_bytes_atomic
 )
+
+
+# Максимальная ширина картинки при отправке (px). Высота — пропорционально.
+MAX_IMAGE_WIDTH = 1920
+# Качество JPEG при пересохранении (только если картинка была JPEG)
+JPEG_QUALITY = 85
 
 
 @dataclass
@@ -95,6 +102,42 @@ def send_message(shared_folder: Path | str, chat_id: str, sender_fp16: str, send
     return msg_id
 
 
+def _process_image(file_path: Path, dest_path: Path) -> None:
+    """Ресайзит картинку (если нужно) и сохраняет в ИСХОДНОМ формате.
+
+    - PNG с альфой → PNG (RGBA), без потери прозрачности.
+    - PNG без альфы → PNG (RGB).
+    - JPEG → JPEG с качеством JPEG_QUALITY.
+    - GIF/BMP/прочее → копируется как есть (обрабатывается в send_file).
+
+    Raises:
+        Exception: если PIL не смог обработать (пробрасывается в send_file).
+    """
+    from PIL import Image
+
+    img = Image.open(file_path)
+    ext = file_path.suffix.lower()
+
+    # Ресайз по ширине
+    if img.width > MAX_IMAGE_WIDTH:
+        ratio = MAX_IMAGE_WIDTH / img.width
+        new_size = (MAX_IMAGE_WIDTH, max(1, int(img.height * ratio)))
+        img = img.resize(new_size, Image.Resampling.LANCZOS)
+
+    if ext == ".png":
+        # Сохраняем PNG, сохраняя альфу, если она есть
+        if img.mode in ("RGBA", "LA", "P"):
+            img = img.convert("RGBA")
+            img.save(dest_path, "PNG", optimize=True)
+        else:
+            img.convert("RGB").save(dest_path, "PNG", optimize=True)
+    elif ext in (".jpg", ".jpeg"):
+        img.convert("RGB").save(dest_path, "JPEG", quality=JPEG_QUALITY, optimize=True)
+    else:
+        # Не должно сюда попасть — вызывается только для png/jpg/jpeg
+        shutil.copy2(file_path, dest_path)
+
+
 def send_file(shared_folder: Path | str, chat_id: str, sender_fp16: str, sender_priv_pem: str,
               file_path: str | Path) -> str:
     file_path = Path(file_path)
@@ -107,36 +150,21 @@ def send_file(shared_folder: Path | str, chat_id: str, sender_fp16: str, sender_
     original_name = file_path.name
     ext = file_path.suffix.lower()
 
-    # Если это картинка — сжимаем
+    # Уникальное имя с сохранением оригинального расширения
+    stored_name = f"{uuid.uuid4().hex}_{original_name}"
+    dest_path = files_dir / stored_name
+
     if ext in ('.png', '.jpg', '.jpeg'):
         try:
-            from PIL import Image
-            import io
-
-            img = Image.open(file_path)
-            # Если картинка больше 1920px по ширине, уменьшаем
-            if img.width > 1920:
-                ratio = 1920 / img.width
-                new_size = (1920, int(img.height * ratio))
-                img = img.resize(new_size, Image.Resampling.LANCZOS)
-
-            new_filename = f"{uuid.uuid4().hex}_{original_name}"
-            dest_path = files_dir / new_filename
-            # Сохраняем как JPEG с качеством 85 (чтобы уменьшить вес)
-            img.convert('RGB').save(dest_path, "JPEG", quality=85)
+            _process_image(file_path, dest_path)
         except Exception as e:
-            logger.error(f"Ошибка сжатия картинки: {e}")
-            # Если не удалось сжать, копируем как есть
-            new_filename = f"{uuid.uuid4().hex}_{original_name}"
-            dest_path = files_dir / new_filename
+            logger.error(f"Ошибка сжатия картинки {original_name}: {e}. Копирую как есть.")
             shutil.copy2(file_path, dest_path)
     else:
-        # Обычный файл — просто копируем
-        new_filename = f"{uuid.uuid4().hex}_{original_name}"
-        dest_path = files_dir / new_filename
+        # GIF/BMP/прочие файлы — копируем как есть, чтобы не потерять анимацию/формат
         shutil.copy2(file_path, dest_path)
 
-    text = f"[FILE]{new_filename}|{original_name}[/FILE]"
+    text = f"[FILE]{stored_name}|{original_name}[/FILE]"
     return send_message(shared_folder, chat_id, sender_fp16, sender_priv_pem, text)
 
 
@@ -158,15 +186,21 @@ def read_messages(shared_folder: Path | str, chat_id: str, my_fp16: str, my_priv
         try:
             group_key = _get_group_key(shared_folder, chat_id, my_fp16, my_priv_pem)
         except ValueError:
-            # Если это админ, но у него нет ключа (например, старое избранное) — просто возвращаем пустой список
             if can_read_all_chats(shared_folder, my_fp16):
                 logger.warning(f"Админ {my_fp16} без ключа от {chat_id}. Пропускаем.")
                 return []
             raise
 
-    # 3. Чтение файлов
+    # 3. Мой fingerprint — считаем ОДИН раз, а не в цикле
+    my_full_fp = None
+    if chat_type == "dm":
+        my_pub_pem = load_private_key(my_priv_pem).publickey().export_key().decode("ascii")
+        my_full_fp = fingerprint(my_pub_pem)
+
+    # 4. Чтение файлов
     msg_dir = chat_message_dir(shared_folder, chat_id)
-    if not msg_dir.is_dir(): return []
+    if not msg_dir.is_dir():
+        return []
 
     messages = []
     for msg_file in msg_dir.glob("*.bin"):
@@ -191,9 +225,6 @@ def read_messages(shared_folder: Path | str, chat_id: str, my_fp16: str, my_priv
                 data_to_check = from_base64(pkg["nonce"]) + from_base64(pkg["ciphertext"])
                 if not rsa_verify(sender_pub, data_to_check, signature):
                     continue
-
-                my_pub_pem = load_private_key(my_priv_pem).publickey().export_key().decode("ascii")
-                my_full_fp = fingerprint(my_pub_pem)
 
                 plaintext = hybrid_decrypt(pkg, my_full_fp, my_priv_pem, aad=aad)
             else:

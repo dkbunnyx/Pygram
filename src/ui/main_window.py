@@ -86,6 +86,7 @@ class MainWindow(QMainWindow):
     def _on_chat_selected(self, chat_id: str):
         """Загружает чат и обновляет список (чтобы убрать счетчик)."""
         self.chat_view.load_chat(chat_id)
+        self.chat_list.current_open_chat_id = chat_id
         self.chat_list.refresh_chats()
 
     def closeEvent(self, event):
@@ -377,6 +378,7 @@ class MainWindow(QMainWindow):
         self.chat_view.label_title.setText("Выберите чат")
         self.chat_view.label_status.setText("")
         self.chat_view.current_chat_id = None
+        self.chat_list.current_open_chat_id = None
 
     def _on_settings_saved(self):
         db = LocalDB()

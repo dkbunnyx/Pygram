@@ -11,7 +11,6 @@ from loguru import logger
 from config import get_config
 from src.core.user import login_user, register_user
 from src.utils.validators import validate_login, validate_password
-import src.ui
 
 
 class LoginView(QWidget):
@@ -22,35 +21,6 @@ class LoginView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._setup_ui()
-    def _auto_fill_login(self):
-        """Автозаполняет логин, если есть сохраненная сессия."""
-        from src.core.user import list_saved_sessions
-        try:
-            sessions = list_saved_sessions()
-            if sessions:
-                # Берем последнюю сессию
-                last_session = sessions[-1]
-                self.input_login.setText(last_session["login"])
-                # Ставим курсор в поле пароля
-                self.input_password.setFocus()
-                logger.info(f"Автозаполнен логин: {last_session['login']}")
-        except Exception as e:
-            logger.error(f"Ошибка автозаполнения: {e}")
-
-    def _auto_fill_login(self):
-        """Автозаполняет логин, если есть сохраненная сессия."""
-        from src.core.user import list_saved_sessions
-        try:
-            sessions = list_saved_sessions()
-            if sessions:
-                # Берем последнюю сессию
-                last_session = sessions[-1]
-                self.input_login.setText(last_session["login"])
-                # Ставим курсор в поле пароля
-                self.input_password.setFocus()
-                logger.info(f"Автозаполнен логин: {last_session['login']}")
-        except Exception as e:
-            logger.error(f"Ошибка автозаполнения: {e}")
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -80,7 +50,7 @@ class LoginView(QWidget):
         self.label_error = QLabel("")
         self.label_error.setObjectName("error_label")
         self.label_error.setAlignment(Qt.AlignCenter)
-        self.label_error.setWordWrap(True) # Чтобы длинный текст переносился
+        self.label_error.setWordWrap(True)
         form_layout.addWidget(self.label_error)
 
         self.btn_login = QPushButton("Войти")
@@ -117,7 +87,6 @@ class LoginView(QWidget):
             validate_password(password)
             return True
         except ValueError as e:
-            # Выводим точную подсказку от валидатора (например, "Логин: 3–32 символа...")
             self._show_error(str(e))
             return False
 
@@ -130,7 +99,6 @@ class LoginView(QWidget):
             self._show_error("Введите логин и пароль")
             return
 
-        # Проверяем формат перед отправкой на сервер
         if not self._validate_inputs(login, password):
             return
 
@@ -159,7 +127,6 @@ class LoginView(QWidget):
             self._show_error("Введите логин и пароль")
             return
 
-        # Строгая проверка формата логина и пароля
         if not self._validate_inputs(login, password):
             return
 

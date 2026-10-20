@@ -63,9 +63,13 @@ class ChatViewWidget(QWidget):
         self.user = user
         self.current_chat_id = None
         self.current_other_fp = None
-        self._last_msg_count = -1
-        self._last_read_count = -1
-        self._last_deleted_count = -1
+
+        # Для инкрементального обновления
+        self._rendered_msg_ids = set()
+        self._rendered_file_count = 0
+        self._rendered_read_count = -1
+        self._rendered_deleted_count = -1
+
         self._setup_ui()
 
         self.emoji_picker = EmojiPicker()
@@ -261,21 +265,17 @@ class ChatViewWidget(QWidget):
         # --- ЛОГИКА РЕАКЦИЙ ---
         if my_reaction:
             if my_reaction == quick_emoji:
-                # Уже стоит быстрая реакция — можно только убрать
                 action_remove = menu.addAction(f"Убрать {my_reaction}")
                 action_remove.triggered.connect(lambda: self._remove_reaction(msg_id))
             else:
-                # Стоит другая — можно убрать её и поставить быструю
                 action_remove = menu.addAction(f"Убрать {my_reaction}")
                 action_remove.triggered.connect(lambda: self._remove_reaction(msg_id))
 
                 action_quick = menu.addAction(f"Поставить {quick_emoji}")
                 action_quick.triggered.connect(lambda: self._set_reaction(msg_id, quick_emoji))
         else:
-            # Ничего не стоит — можно поставить быструю
             action_quick = menu.addAction(f"Поставить {quick_emoji}")
             action_quick.triggered.connect(lambda: self._set_reaction(msg_id, quick_emoji))
-        # ----------------------
 
         menu.addSeparator()
         action_all = menu.addAction("Все реакции...")
@@ -331,9 +331,88 @@ class ChatViewWidget(QWidget):
         set_reaction(self.shared_folder, self.current_chat_id, msg_id, self.user.fp16, None)
         self.load_chat(self.current_chat_id)
 
+    def _create_message_widget(self, msg, read_by_other, profile_dir, font_size):
+        """Создает виджет сообщения для QListWidget."""
+        db = LocalDB()
+        is_me = (msg.sender_fp16 == self.user.fp16)
+        sender_name = "Вы" if is_me else db.get_login_by_fp16(msg.sender_fp16)
+
+        avatar_path = profile_dir / f"{msg.sender_fp16}.png"
+        avatar_path_str = str(avatar_path) if avatar_path.exists() else None
+
+        dt = datetime.fromtimestamp(msg.ts / 1000)
+        time_str = dt.strftime("%H:%M")
+
+        checkmark = ""
+        if is_me:
+            if msg.msg_id in read_by_other:
+                checkmark = " ✓✓"
+            else:
+                checkmark = " ✓"
+
+        reactions = get_reactions(self.shared_folder, self.current_chat_id, msg.msg_id)
+        reactions_html = ""
+        if reactions:
+            from collections import Counter
+            counts = Counter(reactions.values())
+            parts = []
+            for emoji, count in counts.items():
+                parts.append(f"{emoji} {count}")
+            reactions_html = ' '.join(parts)
+
+        is_img = False
+        img_path = None
+        display_text = msg.text
+
+        if msg.text.startswith("[FILE]") and msg.text.endswith("[/FILE]"):
+            inner = msg.text[6:-7]
+            if "|" in inner:
+                stored_name, display_name = inner.split("|", 1)
+            else:
+                stored_name = display_name = inner
+
+            file_path = chat_files_dir(self.shared_folder, self.current_chat_id) / stored_name
+            # ИСПОЛЬЗУЕМ stored_name для определения расширения, т.к. при сжатии имя могло измениться (хотя мы это починили)
+            ext = stored_name.lower().split('.')[-1]
+
+            if ext in ('png', 'jpg', 'jpeg', 'gif', 'bmp'):
+                is_img = True
+                img_path = str(file_path)
+                file_url = QUrl.fromLocalFile(str(file_path)).toString()
+                display_text = f'<a href="{file_url}"><img src="{file_url}" width="200" /></a>'
+            else:
+                file_url = QUrl.fromLocalFile(str(file_path)).toString()
+                display_text = f'<a href="{file_url}" style="color: #89b4fa;">📥 {display_name}</a>'
+
+        widget = MessageWidget(
+            msg_id=msg.msg_id,
+            sender_name=sender_name,
+            text_html=display_text,
+            time_str=time_str + checkmark,
+            is_me=is_me,
+            avatar_path=avatar_path_str,
+            reactions_html=reactions_html,
+            font_size=font_size,
+            is_image=is_img,
+            file_path=img_path
+        )
+        widget.clicked.connect(self._on_message_clicked)
+        widget.double_clicked.connect(self._on_message_double_clicked)
+
+        item = QListWidgetItem()
+        item.setSizeHint(widget.sizeHint())
+        self.messages_list.addItem(item)
+        self.messages_list.setItemWidget(item, widget)
+
     def load_chat(self, chat_id: str):
         self.current_chat_id = chat_id
         self.messages_list.clear()
+
+        # Сбрасываем кэш отрисованных
+        self._rendered_msg_ids.clear()
+        self._rendered_file_count = 0
+        self._rendered_read_count = -1
+        self._rendered_deleted_count = -1
 
         self.avatar_label.setVisible(False)
         self.avatar_label.clear()
@@ -349,8 +428,6 @@ class ChatViewWidget(QWidget):
 
             db = LocalDB()
             profile_dir = Path(self.shared_folder) / ".profiles"
-
-            font_family = db.get_setting("font_family", "Segoe UI")
             font_size = int(db.get_setting("font_size", "14"))
 
             self.current_other_fp = None
@@ -409,11 +486,8 @@ class ChatViewWidget(QWidget):
             self.label_title.setText(title)
             self._update_status()
 
-            messages = read_messages(
-                self.shared_folder, chat_id,
-                self.user.fp16, self.user.priv_pem
-            )
-
+            # Полная загрузка при открытии
+            messages = read_messages(self.shared_folder, chat_id, self.user.fp16, self.user.priv_pem)
             deleted_ids = get_deleted_messages(self.shared_folder, chat_id, self.user.fp16)
             messages = [m for m in messages if m.msg_id not in deleted_ids]
 
@@ -432,75 +506,15 @@ class ChatViewWidget(QWidget):
                 read_by_other = get_read_messages(self.shared_folder, chat_id, self.current_other_fp)
 
             for msg in messages:
-                is_me = (msg.sender_fp16 == self.user.fp16)
-                sender_name = "Вы" if is_me else db.get_login_by_fp16(msg.sender_fp16)
+                self._create_message_widget(msg, read_by_other, profile_dir, font_size)
+                self._rendered_msg_ids.add(msg.msg_id)
 
-                avatar_path = profile_dir / f"{msg.sender_fp16}.png"
-                avatar_path_str = str(avatar_path) if avatar_path.exists() else None
+            msg_dir = chat_message_dir(self.shared_folder, chat_id)
+            if msg_dir.is_dir():
+                self._rendered_file_count = len(list(msg_dir.glob("*.bin")))
 
-                dt = datetime.fromtimestamp(msg.ts / 1000)
-                time_str = dt.strftime("%H:%M")
-
-                checkmark = ""
-                if is_me:
-                    if msg.msg_id in read_by_other:
-                        checkmark = " ✓✓"
-                    else:
-                        checkmark = " ✓"
-
-                reactions = get_reactions(self.shared_folder, chat_id, msg.msg_id)
-                reactions_html = ""
-                if reactions:
-                    from collections import Counter
-                    counts = Counter(reactions.values())
-                    parts = []
-                    for emoji, count in counts.items():
-                        parts.append(f"{emoji} {count}")
-                    reactions_html = ' '.join(parts)
-
-                # Определяем, картинка ли это
-                is_img = False
-                img_path = None
-
-                display_text = msg.text
-                if msg.text.startswith("[FILE]") and msg.text.endswith("[/FILE]"):
-                    inner = msg.text[6:-7]
-                    if "|" in inner:
-                        stored_name, display_name = inner.split("|", 1)
-                    else:
-                        stored_name = display_name = inner
-
-                    file_path = chat_files_dir(self.shared_folder, chat_id) / stored_name
-                    ext = display_name.lower().split('.')[-1]
-
-                    if ext in ('png', 'jpg', 'jpeg', 'gif', 'bmp'):
-                        is_img = True
-                        img_path = str(file_path)
-                        file_url = QUrl.fromLocalFile(str(file_path)).toString()
-                        display_text = f'<a href="{file_url}"><img src="{file_url}" width="200" /></a>'
-                    else:
-                        file_url = QUrl.fromLocalFile(str(file_path)).toString()
-                        display_text = f'<a href="{file_url}" style="color: #89b4fa;">📥 {display_name}</a>'
-
-                widget = MessageWidget(
-                    msg_id=msg.msg_id,
-                    sender_name=sender_name,
-                    text_html=display_text,
-                    time_str=time_str + checkmark,
-                    is_me=is_me,
-                    avatar_path=avatar_path_str,
-                    reactions_html=reactions_html,
-                    font_size=font_size,
-                    is_image=is_img,
-                    file_path=img_path
-                )
-                widget.clicked.connect(self._on_message_clicked)
-                widget.double_clicked.connect(self._on_message_double_clicked)
-
-                item = QListWidgetItem()
-                item.setSizeHint(widget.sizeHint())
-                self.messages_list.addItem(item)
-                self.messages_list.setItemWidget(item, widget)
+            self._rendered_read_count = len(read_by_other)
+            self._rendered_deleted_count = len(deleted_ids)
 
             self.messages_list.scrollToBottom()
 
@@ -528,14 +542,53 @@ class ChatViewWidget(QWidget):
         deleted_ids = get_deleted_messages(self.shared_folder, self.current_chat_id, self.user.fp16)
         deleted_count = len(deleted_ids)
 
-        if (self._last_msg_count != current_files or
-            self._last_read_count != read_count or
-            self._last_deleted_count != deleted_count):
+        # Проверяем, изменилось ли что-то
+        if (self._rendered_file_count == current_files and
+            self._rendered_read_count == read_count and
+            self._rendered_deleted_count == deleted_count):
+            return
 
-            self._last_msg_count = current_files
-            self._last_read_count = read_count
-            self._last_deleted_count = deleted_count
+        # Если удалили сообщения — проще перезагрузить
+        if deleted_count > self._rendered_deleted_count:
             self.load_chat(self.current_chat_id)
+            return
+
+        # Если пришли новые сообщения
+        if current_files > self._rendered_file_count:
+            try:
+                db = LocalDB()
+                profile_dir = Path(self.shared_folder) / ".profiles"
+                font_size = int(db.get_setting("font_size", "14"))
+
+                messages = read_messages(self.shared_folder, self.current_chat_id, self.user.fp16, self.user.priv_pem)
+                messages = [m for m in messages if m.msg_id not in deleted_ids]
+
+                # Находим только новые
+                new_msgs = [m for m in messages if m.msg_id not in self._rendered_msg_ids]
+
+                if new_msgs:
+                    incoming_ids = [m.msg_id for m in new_msgs if m.sender_fp16 != self.user.fp16]
+                    if incoming_ids:
+                        mark_messages_read(self.shared_folder, self.current_chat_id, self.user.fp16, incoming_ids)
+
+                    read_by_other = []
+                    if self.current_other_fp:
+                        read_by_other = get_read_messages(self.shared_folder, self.current_chat_id, self.current_other_fp)
+
+                    for msg in new_msgs:
+                        self._create_message_widget(msg, read_by_other, profile_dir, font_size)
+                        self._rendered_msg_ids.add(msg.msg_id)
+
+                    self.messages_list.scrollToBottom()
+            except Exception as e:
+                logger.error(f"Ошибка инкрементального обновления: {e}")
+                self.load_chat(self.current_chat_id) # fallback
+                return
+
+        # Обновляем счетчики
+        self._rendered_file_count = current_files
+        self._rendered_read_count = read_count
+        self._rendered_deleted_count = deleted_count
 
     def _update_status(self):
         if not self.current_chat_id or not self.current_other_fp:

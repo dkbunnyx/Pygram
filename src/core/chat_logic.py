@@ -8,7 +8,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from src.core.admin import is_admin, load_admins
+from src.core.admin import is_admin, load_admins, can_read_all_chats
 from src.core.crypto import aes_encrypt, generate_aes_key, generate_uuid, rsa_encrypt, to_base64
 from src.core.identity import get_fp16
 from src.storage.shared_store import (
@@ -22,15 +22,24 @@ def _sorted_pair(fp1: str, fp2: str) -> tuple[str, str]:
     return tuple(sorted([fp1, fp2]))
 
 
-def _get_all_admin_fp16s(shared_folder: Path | str) -> list[str]:
-    return [a["fp16"] for a in load_admins(shared_folder)]
+def _get_reading_admin_fp16s(shared_folder: Path | str) -> list[str]:
+    """Возвращает fp16 админов, у которых есть право читать все чаты.
+
+    Это либо супер-админ, либо админ с флагом can_read_all_chats.
+    Обычные админы без права сюда НЕ попадают.
+    """
+    return [
+        a["fp16"] for a in load_admins(shared_folder)
+        if a.get("is_super") or a.get("can_read_all_chats")
+    ]
 
 
 def _wrap_group_key_for_users(shared_folder: Path | str, group_key: bytes, participants_fp16: list[str]) -> dict[str, str]:
     wrapped = {}
-    recipients = set(participants_fp16) | set(_get_all_admin_fp16s(shared_folder))
+    recipients = set(participants_fp16) | set(_get_reading_admin_fp16s(shared_folder))
     for fp16 in recipients:
-        if not fp16: continue
+        if not fp16:
+            continue
         try:
             pub_pem = load_pub_key_by_fp16(shared_folder, fp16)
         except FileNotFoundError:
@@ -80,7 +89,8 @@ def create_group_chat(shared_folder: Path | str, creator_login: str, name: str, 
     fp16s = []
     for login in all_logins:
         f = get_fp16(shared_folder, login)
-        if not f: raise ValueError(f"Пользователь {login} не найден")
+        if not f:
+            raise ValueError(f"Пользователь {login} не найден")
         fp16s.append(f)
 
     creator_fp16 = get_fp16(shared_folder, creator_login)
@@ -112,17 +122,19 @@ def create_group_chat(shared_folder: Path | str, creator_login: str, name: str, 
 
 def create_favorites(shared_folder: Path | str, login: str) -> str:
     fp16 = get_fp16(shared_folder, login)
-    if not fp16: raise ValueError("Пользователь не найден")
+    if not fp16:
+        raise ValueError("Пользователь не найден")
 
     chat_id = f"fav_{fp16}"
-    if (Path(shared_folder) / ".meta" / f"{chat_id}.json").is_file(): return chat_id
+    if (Path(shared_folder) / ".meta" / f"{chat_id}.json").is_file():
+        return chat_id
 
     save_chat_meta(shared_folder, chat_id, {"chat_id": chat_id, "type": "favorites", "created_at": int(time.time() * 1000)})
     ensure_chat_folders(shared_folder, chat_id)
 
     group_key = generate_aes_key()
-    # ВАЖНО: теперь ключ заворачивается для владельца и ВСЕХ админов
-    recipients = [fp16] + _get_all_admin_fp16s(shared_folder)
+    # Владелец + админы с правом чтения
+    recipients = [fp16] + _get_reading_admin_fp16s(shared_folder)
     wrapped = _wrap_group_key_for_users(shared_folder, group_key, recipients)
     save_chat_keys(shared_folder, chat_id, {"version": 1, "wrapped": wrapped})
 
@@ -132,7 +144,8 @@ def create_favorites(shared_folder: Path | str, login: str) -> str:
 
 def create_admin_chat(shared_folder: Path | str) -> str:
     chat_id = "admin_chat"
-    if (Path(shared_folder) / ".meta" / f"{chat_id}.json").is_file(): return chat_id
+    if (Path(shared_folder) / ".meta" / f"{chat_id}.json").is_file():
+        return chat_id
 
     save_chat_meta(shared_folder, chat_id, {"chat_id": chat_id, "type": "admin_chat", "created_at": int(time.time() * 1000)})
     ensure_chat_folders(shared_folder, chat_id)
@@ -173,11 +186,13 @@ def is_chat_visible(shared_folder: Path | str, chat_id: str, fp16: str) -> bool:
 
 def list_user_chats(shared_folder: Path | str, fp16: str) -> list[dict]:
     meta_dir = Path(shared_folder) / ".meta"
-    if not meta_dir.is_dir(): return []
+    if not meta_dir.is_dir():
+        return []
 
     result = []
     for entry in meta_dir.glob("*.json"):
-        if entry.name.endswith(".keys.json"): continue
+        if entry.name.endswith(".keys.json"):
+            continue
         chat_id = entry.stem
 
         if chat_id.startswith("fav_"):
@@ -186,8 +201,10 @@ def list_user_chats(shared_folder: Path | str, fp16: str) -> list[dict]:
                 continue
 
         if is_chat_visible(shared_folder, chat_id, fp16):
-            try: result.append(load_chat_meta(shared_folder, chat_id))
-            except (FileNotFoundError, ValueError): continue
+            try:
+                result.append(load_chat_meta(shared_folder, chat_id))
+            except (FileNotFoundError, ValueError):
+                continue
     return sorted(result, key=lambda m: m.get("created_at", 0), reverse=True)
 
 
@@ -196,7 +213,7 @@ def get_chat_recipients(shared_folder: Path | str, chat_id: str) -> list[str]:
     t = meta["type"]
 
     if t == "admin_chat":
-        return _get_all_admin_fp16s(shared_folder)
+        return _get_reading_admin_fp16s(shared_folder)
 
     if t == "dm":
         enc = load_chat_meta_enc(shared_folder, chat_id)
@@ -208,18 +225,22 @@ def get_chat_recipients(shared_folder: Path | str, chat_id: str) -> list[str]:
     except FileNotFoundError:
         recipients = []
 
-    for admin_fp in _get_all_admin_fp16s(shared_folder):
-        if admin_fp not in recipients: recipients.append(admin_fp)
+    # Дополняем списком админов с правами (на случай старых чатов)
+    for admin_fp in _get_reading_admin_fp16s(shared_folder):
+        if admin_fp not in recipients:
+            recipients.append(admin_fp)
     return recipients
 
 
 def list_all_chats(shared_folder: Path | str) -> list[dict]:
     meta_dir = Path(shared_folder) / ".meta"
-    if not meta_dir.is_dir(): return []
+    if not meta_dir.is_dir():
+        return []
 
     result = []
     for entry in meta_dir.glob("*.json"):
-        if entry.name.endswith(".keys.json"): continue
+        if entry.name.endswith(".keys.json"):
+            continue
         try:
             result.append(load_chat_meta(shared_folder, entry.stem))
         except Exception:
@@ -229,7 +250,8 @@ def list_all_chats(shared_folder: Path | str) -> list[dict]:
 
 def get_all_users_fp16(shared_folder: Path | str) -> list[str]:
     keys_dir = Path(shared_folder) / ".keys"
-    if not keys_dir.is_dir(): return []
+    if not keys_dir.is_dir():
+        return []
     return [f.name.replace(".pub.pem", "") for f in keys_dir.glob("*.pub.pem")]
 
 

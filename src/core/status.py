@@ -2,15 +2,23 @@
 
 from pathlib import Path
 import json
+import re
 import time
 from loguru import logger
 
 DIR_STATUS = ".status"
 
+# Формат msg_id: <ts>_<sender_fp16>_<uuid8>
+# ts — цифры (миллисекунды), sender_fp16 — 16 hex, uuid8 — 8 hex.
+# Регулярка позволяет безопасно извлечь sender_fp16, даже если ts или uuid изменятся.
+_MSG_ID_RE = re.compile(r"^\d+_([0-9a-f]{16})_[0-9a-f]+$", re.IGNORECASE)
+
+
 def _status_file(shared_folder: Path | str, fp16: str) -> Path:
     path = Path(shared_folder) / DIR_STATUS
     path.mkdir(parents=True, exist_ok=True)
     return path / f"{fp16}.json"
+
 
 def set_online(shared_folder: Path | str, fp16: str, online: bool):
     try:
@@ -18,6 +26,7 @@ def set_online(shared_folder: Path | str, fp16: str, online: bool):
         _status_file(shared_folder, fp16).write_text(json.dumps(data), encoding="utf-8")
     except Exception as e:
         logger.error(f"Ошибка установки статуса: {e}")
+
 
 def set_typing(shared_folder: Path | str, fp16: str, chat_id: str, typing: bool):
     try:
@@ -35,6 +44,7 @@ def set_typing(shared_folder: Path | str, fp16: str, chat_id: str, typing: bool)
     except Exception as e:
         logger.error(f"Ошибка установки 'печатает': {e}")
 
+
 def get_status(shared_folder: Path | str, fp16: str) -> dict:
     try:
         path = _status_file(shared_folder, fp16)
@@ -44,12 +54,14 @@ def get_status(shared_folder: Path | str, fp16: str) -> dict:
         pass
     return {"online": False, "last_seen": 0, "typing": False, "typing_chat": ""}
 
+
 # --- ГАЛОЧКИ ПРОЧТЕНИЯ ---
 
 def _read_file(shared_folder: Path | str, chat_id: str, fp16: str) -> Path:
     path = Path(shared_folder) / DIR_STATUS / "read"
     path.mkdir(parents=True, exist_ok=True)
     return path / f"{chat_id}_{fp16}.json"
+
 
 def mark_messages_read(shared_folder: Path | str, chat_id: str, fp16: str, msg_ids: list[str]):
     try:
@@ -63,6 +75,7 @@ def mark_messages_read(shared_folder: Path | str, chat_id: str, fp16: str, msg_i
     except Exception as e:
         logger.error(f"Ошибка отметки прочтения: {e}")
 
+
 def get_read_messages(shared_folder: Path | str, chat_id: str, fp16: str) -> list[str]:
     try:
         path = _read_file(shared_folder, chat_id, fp16)
@@ -72,12 +85,14 @@ def get_read_messages(shared_folder: Path | str, chat_id: str, fp16: str) -> lis
         pass
     return []
 
+
 # --- РЕАКЦИИ ---
 
 def _reactions_file(shared_folder: Path | str, chat_id: str, msg_id: str) -> Path:
     path = Path(shared_folder) / DIR_STATUS / "reactions"
     path.mkdir(parents=True, exist_ok=True)
     return path / f"{chat_id}_{msg_id}.json"
+
 
 def set_reaction(shared_folder: Path | str, chat_id: str, msg_id: str, fp16: str, emoji: str | None):
     try:
@@ -95,6 +110,7 @@ def set_reaction(shared_folder: Path | str, chat_id: str, msg_id: str, fp16: str
     except Exception as e:
         logger.error(f"Ошибка установки реакции: {e}")
 
+
 def get_reactions(shared_folder: Path | str, chat_id: str, msg_id: str) -> dict:
     try:
         path = _reactions_file(shared_folder, chat_id, msg_id)
@@ -104,12 +120,14 @@ def get_reactions(shared_folder: Path | str, chat_id: str, msg_id: str) -> dict:
         pass
     return {}
 
+
 # --- УДАЛЕННЫЕ СООБЩЕНИЯ ---
 
 def _deleted_file(shared_folder: Path | str, chat_id: str) -> Path:
     path = Path(shared_folder) / DIR_STATUS / "deleted"
     path.mkdir(parents=True, exist_ok=True)
     return path / f"{chat_id}.json"
+
 
 def delete_message(shared_folder: Path | str, chat_id: str, msg_id: str, fp16: str, for_everyone: bool = False):
     try:
@@ -133,6 +151,7 @@ def delete_message(shared_folder: Path | str, chat_id: str, msg_id: str, fp16: s
     except Exception as e:
         logger.error(f"Ошибка удаления сообщения: {e}")
 
+
 def get_deleted_messages(shared_folder: Path | str, chat_id: str, fp16: str) -> list[str]:
     try:
         path = _deleted_file(shared_folder, chat_id)
@@ -144,14 +163,20 @@ def get_deleted_messages(shared_folder: Path | str, chat_id: str, fp16: str) -> 
         pass
     return []
 
+
 # --- НЕПРОЧИТАННЫЕ ---
 
 def get_unread_count(shared_folder: Path | str, chat_id: str, my_fp16: str) -> int:
-    """Возвращает количество непрочитанных сообщений в чате (для любого типа)."""
+    """Возвращает количество непрочитанных сообщений в чате (для любого типа).
+
+    Устойчиво к формату msg_id: sender_fp16 извлекается через регулярку.
+    Файлы, чей msg_id не соответствует формату, считаются мусором и пропускаются —
+    иначе битое сообщение навсегда «висело» бы в счётчике.
+    """
     from src.storage.shared_store import chat_message_dir
 
     try:
-        read_by_me = get_read_messages(shared_folder, chat_id, my_fp16)
+        read_by_me = set(get_read_messages(shared_folder, chat_id, my_fp16))
         msg_dir = chat_message_dir(shared_folder, chat_id)
 
         if not msg_dir.is_dir():
@@ -162,11 +187,15 @@ def get_unread_count(shared_folder: Path | str, chat_id: str, my_fp16: str) -> i
             msg_id = msg_file.stem
             if msg_id in read_by_me:
                 continue
-            parts = msg_id.split("_")
-            if len(parts) >= 2:
-                sender = parts[1]
-                if sender != my_fp16:
-                    count += 1
+
+            match = _MSG_ID_RE.match(msg_id)
+            if not match:
+                # Битый / чужой msg_id — пропускаем, чтобы не залипал счётчик
+                continue
+
+            sender = match.group(1)
+            if sender != my_fp16:
+                count += 1
         return count
     except Exception:
         return 0
