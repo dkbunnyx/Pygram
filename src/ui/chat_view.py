@@ -22,7 +22,6 @@ from src.storage.shared_store import chat_files_dir, load_chat_keys, load_chat_m
 
 
 class ImageConfirmDialog(QDialog):
-    """Диалог подтверждения отправки картинки из буфера."""
     def __init__(self, image, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Отправить картинку?")
@@ -38,37 +37,47 @@ class ImageConfirmDialog(QDialog):
         layout.addWidget(label)
 
         btn_layout = QHBoxLayout()
-
         btn_cancel = QPushButton("Отмена")
         btn_cancel.clicked.connect(self.reject)
         btn_layout.addWidget(btn_cancel)
-
         btn_layout.addStretch()
-
         btn_send = QPushButton("Отправить")
         btn_send.setStyleSheet("background-color: #4a90e2; color: white; font-weight: bold;")
         btn_send.clicked.connect(self.accept)
         btn_layout.addWidget(btn_send)
-
         layout.addLayout(btn_layout)
 
 
 class ChatViewWidget(QWidget):
-    """Окно с историей сообщений и полем ввода."""
-
     def __init__(self, shared_folder: str | Path, user, parent=None):
         super().__init__(parent)
         self.shared_folder = shared_folder
         self.user = user
         self.current_chat_id = None
+        self.current_other_fp = None
         self._setup_ui()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
 
+        self.header_widget = QWidget()
+        header_layout = QHBoxLayout(self.header_widget)
+        header_layout.setContentsMargins(10, 5, 10, 5)
+        header_layout.setSpacing(10)
+
+        self.avatar_label = QLabel()
+        self.avatar_label.setFixedSize(36, 36)
+        self.avatar_label.setCursor(Qt.PointingHandCursor)
+        self.avatar_label.mousePressEvent = self._on_avatar_clicked
+        header_layout.addWidget(self.avatar_label)
+
         self.label_title = QLabel("Выберите чат")
-        self.label_title.setStyleSheet("font-size: 16px; font-weight: bold; padding: 10px;")
-        layout.addWidget(self.label_title)
+        self.label_title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        header_layout.addWidget(self.label_title)
+
+        header_layout.addStretch()
+
+        layout.addWidget(self.header_widget)
 
         self.text_browser = QTextBrowser()
         self.text_browser.setObjectName("message_history")
@@ -108,6 +117,10 @@ class ChatViewWidget(QWidget):
         self.current_chat_id = chat_id
         self.text_browser.clear()
 
+        # Очистка аватарки в заголовке
+        self.avatar_label.clear()
+        self.avatar_label.setStyleSheet("")
+
         self.input_widget.setVisible(True)
 
         try:
@@ -115,17 +128,28 @@ class ChatViewWidget(QWidget):
             chat_type = meta["type"]
 
             db = LocalDB()
+            profile_dir = Path(self.shared_folder) / ".profiles"
 
-            # --- ОПРЕДЕЛЯЕМ ЗАГОЛОВОК ---
+            font_family = db.get_setting("font_family", "Segoe UI")
+            font_size = db.get_setting("font_size", "14")
+
+            self.current_other_fp = None
+
             if chat_type == "dm":
                 parts = chat_id.replace("dm_", "").split("__")
                 if len(parts) == 2:
                     fp1, fp2 = parts
-                    other_fp = fp1 if fp2 == self.user.fp16 else fp2
-                    other_login = db.get_login_by_fp16(other_fp)
-                    title = f"👤 {other_login}"
+                    self.current_other_fp = fp1 if fp2 == self.user.fp16 else fp2
+                    other_login = db.get_login_by_fp16(self.current_other_fp)
+                    title = other_login  # БЕЗ СМАЙЛИКА
+
+                    avatar_path = profile_dir / f"{self.current_other_fp}.png"
+                    if avatar_path.exists():
+                        pixmap = QPixmap(str(avatar_path))
+                        self.avatar_label.setPixmap(pixmap.scaled(36, 36, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                    # Если нет аватарки — пусто (ничего не ставим)
                 else:
-                    title = "👤 Личный чат"
+                    title = "Личный чат"
 
             elif chat_type == "group":
                 group_name = f"Группа {chat_id[4:12]}"
@@ -143,14 +167,16 @@ class ChatViewWidget(QWidget):
                             meta_group = json.loads(decrypted.decode("utf-8"))
                             group_name = meta_group.get("name", group_name)
                 except Exception as e:
-                    logger.error(f"Не удалось расшифровать имя группы в chat_view: {e}")
+                    logger.error(f"Не удалось расшифровать имя группы: {e}")
 
-                title = f"👥 {group_name}"
+                title = group_name  # БЕЗ СМАЙЛИКА
+                # Для группы можно поставить иконку группы, но ты сказал убрать смайлик
+                # Оставляем пусто, если нет картинки
 
             elif chat_type == "favorites":
-                title = "⭐ Избранное"
+                title = "Избранное"
             elif chat_type == "admin_chat":
-                title = "🛡 Админ-чат"
+                title = "Админ-чат"
             else:
                 title = chat_id
 
@@ -194,6 +220,14 @@ class ChatViewWidget(QWidget):
 
                 sender_name = "Вы" if is_me else db.get_login_by_fp16(msg.sender_fp16)
 
+                # Аватарка в сообщении: если есть — показываем, если нет — НИЧЕГО
+                avatar_html = ""
+                sender_avatar_path = profile_dir / f"{msg.sender_fp16}.png"
+                if sender_avatar_path.exists():
+                    avatar_url = QUrl.fromLocalFile(str(sender_avatar_path)).toString()
+                    avatar_html = f"<img src='{avatar_url}' width='20' height='20' style='border-radius: 10px;' />&nbsp;"
+                # Если нет — avatar_html пустой (без смайлика)
+
                 # Обработка файлов
                 display_text = msg.text
                 if msg.text.startswith("[FILE]") and msg.text.endswith("[/FILE]"):
@@ -220,11 +254,11 @@ class ChatViewWidget(QWidget):
                         display_text = f"📎 <a href='{file_url}' style='color: #89b4fa; text-decoration: none;'>📥 {display_name}</a>"
 
                 html += f"""
-                <div style="text-align: {align}; margin-top: 10px; margin-bottom: 10px;">
-                    <div style="color: {name_color}; font-weight: bold; font-size: 11px; margin-bottom: 2px;">
-                        {sender_name}
+                <div style="text-align: {align}; margin-top: 10px; margin-bottom: 10px; font-family: '{font_family}';">
+                    <div style="color: {name_color}; font-weight: bold; font-size: 9pt; margin-bottom: 2px;">
+                        {avatar_html}{sender_name}
                     </div>
-                    <table align="{align}" cellpadding="8" cellspacing="0" style="background-color: {bg_color}; border-radius: 8px; color: {txt_color}; font-size: 14px;">
+                    <table align="{align}" cellpadding="8" cellspacing="0" style="background-color: {bg_color}; border-radius: 8px; color: {txt_color}; font-size: {font_size}pt; font-family: '{font_family}';">
                         <tr>
                             <td>{display_text}</td>
                         </tr>
@@ -240,6 +274,12 @@ class ChatViewWidget(QWidget):
         except Exception as e:
             logger.error(f"Ошибка загрузки чата {chat_id}: {e}")
             self.text_browser.setHtml(f"<b style='color: red;'>Ошибка загрузки сообщений</b><br>{e}")
+
+    def _on_avatar_clicked(self, event):
+        if self.current_other_fp:
+            from src.ui.profile_view import ProfileView
+            self.profile_window = ProfileView(self.shared_folder, self.user, target_fp16=self.current_other_fp)
+            self.profile_window.show()
 
     def eventFilter(self, obj, event):
         if obj is self.input_field and event.type() == QEvent.KeyPress:
@@ -268,7 +308,6 @@ class ChatViewWidget(QWidget):
         return super().eventFilter(obj, event)
 
     def _on_anchor_clicked(self, url: QUrl):
-        """Скачивает файл и открывает его."""
         path_str = url.toLocalFile()
         if not path_str:
             return

@@ -6,8 +6,8 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QListWidget,
     QListWidgetItem, QPushButton, QInputDialog, QMessageBox
 )
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtGui import QColor, QIcon, QPixmap
 from loguru import logger
 
 from src.core.chat_logic import list_user_chats, create_dm_chat, list_all_chats, create_group_chat
@@ -28,6 +28,7 @@ class ChatListWidget(QWidget):
         self.user_login = user_login
         self.user_priv_pem = user_priv_pem
         self.user_is_admin = user_is_admin
+        self.profile_dir = Path(shared_folder) / ".profiles"
         self._setup_ui()
         self.refresh_chats()
 
@@ -47,11 +48,11 @@ class ChatListWidget(QWidget):
 
         self.list_widget = QListWidget()
         self.list_widget.setObjectName("chat_list")
+        self.list_widget.setIconSize(QSize(24, 24)) # Размер аватарки в списке
         self.list_widget.itemClicked.connect(self._on_item_clicked)
         layout.addWidget(self.list_widget)
 
     def _get_group_name(self, chat_id: str) -> str:
-        """Пытается расшифровать название группы."""
         if not self.user_priv_pem:
             return f"Группа {chat_id[4:12]}"
         try:
@@ -109,46 +110,40 @@ class ChatListWidget(QWidget):
         chat_type = chat["type"]
         db = LocalDB()
 
+        icon = None
+        display_name = chat_id
+
         if chat_type == "dm":
-            icon = "👤"
             parts = chat_id.replace("dm_", "").split("__")
             if len(parts) == 2:
                 fp1, fp2 = parts
-                if fp1 == self.user_fp16:
-                    other_fp = fp2
-                elif fp2 == self.user_fp16:
-                    other_fp = fp1
-                else:
-                    other_fp = fp1
+                other_fp = fp1 if fp2 == self.user_fp16 else fp2
 
-                # Пытаемся получить логин из БД
                 display_name = db.get_login_by_fp16(other_fp)
-
-                # Если логин не найден (вернулся fp16), то пробуем взять оригинальное имя
-                # (но в шаре его нет, поэтому оставляем fp16)
                 if display_name == other_fp[:8]:
                     display_name = f"Чат {other_fp[:8]}"
+
+                # Пытаемся загрузить аватарку
+                avatar_path = self.profile_dir / f"{other_fp}.png"
+                if avatar_path.exists():
+                    icon = QIcon(str(avatar_path))
             else:
                 display_name = "Личный чат"
 
         elif chat_type == "group":
-            icon = "👥"
             display_name = self._get_group_name(chat_id)
 
         elif chat_type == "favorites":
-            icon = "⭐"
-            owner_fp = chat_id.replace("fav_", "")
-            owner_name = db.get_login_by_fp16(owner_fp)
-            display_name = f"Избранное ({owner_name})" if prefix else "Избранное"
+            display_name = f"Избранное ({db.get_login_by_fp16(chat_id.replace('fav_', ''))})" if prefix else "Избранное"
         elif chat_type == "admin_chat":
-            icon = "🛡"
             display_name = "Админ-чат"
-        else:
-            icon = "💬"
-            display_name = chat_id
 
-        text = f"{prefix}{icon}  {display_name}"
+        text = f"{prefix}{display_name}"
         item = QListWidgetItem(text)
+
+        if icon:
+            item.setIcon(icon)
+
         item.setData(Qt.UserRole, chat_id)
         self.list_widget.addItem(item)
 
@@ -164,7 +159,6 @@ class ChatListWidget(QWidget):
             try:
                 chat_id = create_dm_chat(self.shared_folder, self.user_login, login)
 
-                # СОХРАНЯЕМ ЛОГИН В БД, чтобы потом отображать его
                 from src.core.identity import get_fp16
                 other_fp = get_fp16(self.shared_folder, login)
                 if other_fp:
