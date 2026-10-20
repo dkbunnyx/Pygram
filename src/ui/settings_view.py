@@ -120,7 +120,7 @@ class SettingsView(QWidget):
         p_layout.addLayout(emoji_row)
 
         # Быстрая реакция
-        p_layout.addWidget(QLabel("Быстрая реакция (двойной клик):"))
+        p_layout.addWidget(QLabel("Быстрая реакция (ЛКМ по сообщению):"))
         quick_row = QHBoxLayout()
         self.btn_quick_reaction = QPushButton("❤️")
         self.btn_quick_reaction.setFixedSize(50, 40)
