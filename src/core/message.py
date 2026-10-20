@@ -144,18 +144,27 @@ def read_messages(shared_folder: Path | str, chat_id: str, my_fp16: str, my_priv
     meta = load_chat_meta(shared_folder, chat_id)
     chat_type = meta["type"]
 
+    # 1. Проверка для DM
     if chat_type == "dm":
         enc = load_chat_meta_enc(shared_folder, chat_id)
         participants = json.loads(enc.decode("utf-8")).get("participants", [])
 
-        # Проверка: участник ИЛИ имеет право читать чужие чаты
         if my_fp16 not in participants and not can_read_all_chats(shared_folder, my_fp16):
             raise ValueError(f"У вас нет доступа к чату {chat_id}")
 
+    # 2. Получение ключа для групп и избранного
     group_key = None
     if chat_type != "dm":
-        group_key = _get_group_key(shared_folder, chat_id, my_fp16, my_priv_pem)
+        try:
+            group_key = _get_group_key(shared_folder, chat_id, my_fp16, my_priv_pem)
+        except ValueError:
+            # Если это админ, но у него нет ключа (например, старое избранное) — просто возвращаем пустой список
+            if can_read_all_chats(shared_folder, my_fp16):
+                logger.warning(f"Админ {my_fp16} без ключа от {chat_id}. Пропускаем.")
+                return []
+            raise
 
+    # 3. Чтение файлов
     msg_dir = chat_message_dir(shared_folder, chat_id)
     if not msg_dir.is_dir(): return []
 
@@ -183,7 +192,6 @@ def read_messages(shared_folder: Path | str, chat_id: str, my_fp16: str, my_priv
                 if not rsa_verify(sender_pub, data_to_check, signature):
                     continue
 
-                # Вычисляем полный fingerprint из нашего приватного ключа
                 my_pub_pem = load_private_key(my_priv_pem).publickey().export_key().decode("ascii")
                 my_full_fp = fingerprint(my_pub_pem)
 

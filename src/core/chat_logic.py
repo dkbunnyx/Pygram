@@ -99,7 +99,7 @@ def create_group_chat(shared_folder: Path | str, creator_login: str, name: str, 
         "name": name, "description": "", "members": fp16s,
         "admins": [creator_fp16], "created_by": creator_fp16,
         "creator_fp16": creator_fp16,
-        "member_permissions": {},  # <--- ДОБАВЛЕНО
+        "member_permissions": {},
         "pinned_message": None, "public": False,
     }
 
@@ -121,7 +121,9 @@ def create_favorites(shared_folder: Path | str, login: str) -> str:
     ensure_chat_folders(shared_folder, chat_id)
 
     group_key = generate_aes_key()
-    wrapped = _wrap_group_key_for_users(shared_folder, group_key, [fp16])
+    # ВАЖНО: теперь ключ заворачивается для владельца и ВСЕХ админов
+    recipients = [fp16] + _get_all_admin_fp16s(shared_folder)
+    wrapped = _wrap_group_key_for_users(shared_folder, group_key, recipients)
     save_chat_keys(shared_folder, chat_id, {"version": 1, "wrapped": wrapped})
 
     save_chat_meta_enc(shared_folder, chat_id, json.dumps({"owner": fp16}).encode("utf-8"))

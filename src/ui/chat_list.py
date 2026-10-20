@@ -31,7 +31,7 @@ class ChatListWidget(QWidget):
         self.user_priv_pem = user_priv_pem
         self.user_is_admin = user_is_admin
         self.profile_dir = Path(shared_folder) / ".profiles"
-        self._last_unread = {}  # <--- ДЛЯ УВЕДОМЛЕНИЙ
+        self._last_unread = {}
         self._setup_ui()
         self.refresh_chats()
 
@@ -90,8 +90,8 @@ class ChatListWidget(QWidget):
                 self.list_widget.addItem(item)
             else:
                 for chat in chats:
-                    self._add_chat_item(chat)
-                self._check_new_messages(chats)  # <--- ПРОВЕРКА УВЕДОМЛЕНИЙ
+                    self._add_chat_item(chat, show_unread=True)
+                self._check_new_messages(chats)
 
             if self.user_is_admin:
                 header_all = QListWidgetItem("СПИСОК ВСЕХ ЧАТОВ (АДМИН)")
@@ -104,12 +104,13 @@ class ChatListWidget(QWidget):
 
                 for chat in all_chats:
                     if chat["chat_id"] not in my_chat_ids:
-                        self._add_chat_item(chat, prefix="  ")
+                        # Для чужих чатов не показываем счетчик
+                        self._add_chat_item(chat, prefix="  ", show_unread=False)
 
         except Exception as e:
             logger.error(f"Ошибка загрузки чатов: {e}")
 
-    def _add_chat_item(self, chat: dict, prefix: str = ""):
+    def _add_chat_item(self, chat: dict, prefix: str = "", show_unread: bool = True):
         chat_id = chat["chat_id"]
         chat_type = chat["type"]
         db = LocalDB()
@@ -143,14 +144,21 @@ class ChatListWidget(QWidget):
                 display_name = f"👥 {display_name}"
 
         elif chat_type == "favorites":
-            display_name = "⭐ Избранное"
+            owner_fp = chat_id.replace("fav_", "")
+            owner_login = db.get_login_by_fp16(owner_fp)
+            if prefix:  # Значит это чужой чат (в админ-списке)
+                display_name = f"⭐ Избранное {owner_login}"
+            else:
+                display_name = "⭐ Избранное"
 
         elif chat_type == "admin_chat":
             display_name = "🛡 Админ-чат"
 
-        unread = get_unread_count(self.shared_folder, chat_id, self.user_fp16)
-        if unread > 0:
-            display_name = f"{display_name} ({unread})"
+        # Счетчик непрочитанных (только если show_unread=True)
+        if show_unread:
+            unread = get_unread_count(self.shared_folder, chat_id, self.user_fp16)
+            if unread > 0:
+                display_name = f"{display_name} ({unread})"
 
         text = f"{prefix}{display_name}"
         item = QListWidgetItem(text)
