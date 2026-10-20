@@ -17,13 +17,14 @@ class MessageWidget(QWidget):
                  time_str: str, is_me: bool, avatar_path: str = None,
                  reactions_html: str = "", font_size: int = 14,
                  is_image: bool = False, file_path: str = None,
-                 bg_color: str = "#4a90e2", parent=None):  # <--- ДОБАВИЛИ
+                 bg_color: str = "#4a90e2", parent=None):
         super().__init__(parent)
         self.msg_id = msg_id
         self.is_me = is_me
         self.is_image = is_image
         self.file_path = file_path
-        self.bg_color = bg_color  # <--- СОХРАНИЛИ
+        self.bg_color = bg_color
+        self.is_selected = False  # Флаг выделения
         self._setup_ui(sender_name, text_html, time_str, avatar_path, reactions_html, font_size)
 
     def _setup_ui(self, sender_name, text_html, time_str, avatar_path, reactions_html, font_size):
@@ -70,15 +71,7 @@ class MessageWidget(QWidget):
         self.text_label.setCursor(Qt.PointingHandCursor)
         self.text_label.setAttribute(Qt.WA_TransparentForMouseEvents)
 
-        bg_color = self.bg_color
-        self.text_label.setStyleSheet(f"""
-            QLabel {{
-                background-color: {bg_color};
-                border-radius: 8px;
-                padding: 8px;
-                font-size: {font_size}pt;
-            }}
-        """)
+        self._apply_bubble_style(font_size)
 
         self.text_label.setMaximumWidth(600)
 
@@ -119,6 +112,29 @@ class MessageWidget(QWidget):
                 footer.addStretch()
 
         layout.addLayout(footer)
+
+    def _apply_bubble_style(self, font_size=14):
+        """Применяет стиль бабла в зависимости от того, выбрано оно или нет."""
+        if self.is_selected:
+            # Если выбрано — добавляем яркую рамку
+            border = "2px solid #f38ba8" # Красная рамка
+        else:
+            border = "2px solid transparent"
+
+        self.text_label.setStyleSheet(f"""
+            QLabel {{
+                background-color: {self.bg_color};
+                border-radius: 8px;
+                border: {border};
+                padding: 8px;
+                font-size: {font_size}pt;
+            }}
+        """)
+
+    def set_selected(self, selected: bool, font_size: int = 14):
+        """Включает/выключает режим выделения."""
+        self.is_selected = selected
+        self._apply_bubble_style(font_size)
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:

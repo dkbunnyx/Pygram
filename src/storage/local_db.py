@@ -10,7 +10,7 @@ from loguru import logger
 
 from src.os_integration.win import get_local_dir
 
-DB_VERSION = 1
+DB_VERSION = 2  # Увеличили версию, так как добавили новую таблицу
 
 
 class LocalDB:
@@ -26,6 +26,7 @@ class LocalDB:
         conn = self._get_conn()
         self._init_schema()
         # Соединение оставляем открытым! Не закрываем его.
+
     def _get_conn(self) -> sqlite3.Connection:
         """Возвращает соединение для текущего потока."""
         if not hasattr(self._local, "conn"):
@@ -63,14 +64,25 @@ class LocalDB:
                 value TEXT NOT NULL
             )
         """)
-        cursor.execute(f"PRAGMA user_version = {DB_VERSION}")
-        #Таблица соответствия fp16 -> login
+
+        # Таблица соответствия fp16 -> login
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users_map (
                 fp16 TEXT PRIMARY KEY,
                 login TEXT NOT NULL
             )
         """)
+
+        # НОВАЯ ТАБЛИЦА: кэш чатов (тип и название)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chats_cache (
+                chat_id TEXT PRIMARY KEY,
+                chat_type TEXT NOT NULL,
+                title TEXT NOT NULL
+            )
+        """)
+
+        cursor.execute(f"PRAGMA user_version = {DB_VERSION}")
         conn.commit()
         logger.info(f"БД инициализирована: {self.path}")
 
@@ -132,6 +144,7 @@ class LocalDB:
         cursor = self._get_conn().execute("SELECT value FROM settings WHERE key = ?", (key,))
         row = cursor.fetchone()
         return row["value"] if row else default
+
     # ========================================================================
     # Маппинг пользователей (fp16 -> login)
     # ========================================================================
@@ -145,3 +158,27 @@ class LocalDB:
         cursor = self._get_conn().execute("SELECT login FROM users_map WHERE fp16 = ?", (fp16,))
         row = cursor.fetchone()
         return row["login"] if row else fp16[:8]  # Если не нашли, возвращаем обрезок fp16
+
+    # ========================================================================
+    # Кэш чатов (тип и название)
+    # ========================================================================
+
+    def save_chat_cache(self, chat_id: str, chat_type: str, title: str):
+        """Сохраняет тип и название чата, чтобы не читать их из сети каждый раз."""
+        conn = self._get_conn()
+        conn.execute(
+            "INSERT OR REPLACE INTO chats_cache (chat_id, chat_type, title) VALUES (?, ?, ?)",
+            (chat_id, chat_type, title)
+        )
+        conn.commit()
+
+    def get_chat_cache(self, chat_id: str) -> dict | None:
+        """Возвращает закэшированные данные чата (мгновенно)."""
+        cursor = self._get_conn().execute(
+            "SELECT chat_type, title FROM chats_cache WHERE chat_id = ?",
+            (chat_id,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return {"type": row["chat_type"], "title": row["title"]}
+        return None

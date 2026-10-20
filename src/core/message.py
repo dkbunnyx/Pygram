@@ -469,3 +469,29 @@ def _read_single_message(
         shared_folder, chat_id, my_fp16, my_priv_pem,
         msg_file, chat_type, group_key, my_full_fp,
     )
+
+
+# ============================================================================
+# СИНХРОНИЗАЦИЯ С ЛОКАЛЬНОЙ БД (для быстрого UI)
+# ============================================================================
+
+def sync_messages_to_db(shared_folder: Path | str, chat_id: str, my_fp16: str, my_priv_pem: str):
+    """Синхронизирует новые сообщения из шары в локальную SQLite.
+
+    Читает только те файлы, которых еще нет в БД (инкрементально).
+    Используется фоновым потоком ChatLoadWorker в UI.
+    """
+    from src.storage.local_db import LocalDB
+
+    db = LocalDB()
+
+    # 1. Получаем ID сообщений, которые уже есть в локальной БД
+    existing_msgs = db.get_messages(chat_id)
+    known_ids = {m["msg_id"] for m in existing_msgs}
+
+    # 2. Читаем только новые (которых нет в known_ids)
+    new_msgs = read_new_messages(shared_folder, chat_id, my_fp16, my_priv_pem, known_ids)
+
+    # 3. Сохраняем в БД
+    for msg in new_msgs:
+        db.save_message(msg.msg_id, chat_id, msg.sender_fp16, msg.text, msg.ts)
