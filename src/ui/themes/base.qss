@@ -94,3 +94,31 @@ QListWidget::item:selected {
     background-color: #313148;
     color: #89b4fa;
 }
+
+/* ==================== ВКЛАДКИ НАСТРОЕК ==================== */
+QTabWidget::pane {
+    border: 1px solid #313148;
+    background-color: #1a1a2e; /* Фон под вкладками */
+}
+
+QTabBar::tab {
+    background-color: #e0e0e0; /* Светло-серый фон вкладки (как на скрине) */
+    color: #000000;            /* ЧЕРНЫЙ ЦВЕТ ТЕКСТА */
+    font-weight: bold;         /* Жирный шрифт для читаемости */
+    padding: 8px 16px;
+    border: 1px solid #b0b0b0;
+    border-bottom: none;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    margin-right: 2px;
+}
+
+QTabBar::tab:selected {
+    background-color: #ffffff; /* Активная вкладка — белая */
+    color: #000000;            /* Черный текст */
+    border-bottom: 2px solid #ffffff; /* Сливается с панелью */
+}
+
+QTabBar::tab:hover:!selected {
+    background-color: #f0f0f0; /* Чуть светлее при наведении */
+}

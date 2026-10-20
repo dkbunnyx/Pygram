@@ -7,6 +7,7 @@ import base64
 import hashlib
 import secrets
 import uuid
+from functools import lru_cache
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
 from Crypto.PublicKey import RSA
@@ -220,8 +221,9 @@ def generate_rsa_keypair() -> tuple[str, str]:
     return private_pem, public_pem
 
 
+@lru_cache(maxsize=32)
 def load_private_key(pem: str) -> RSA.RsaKey:
-    """Загружает приватный RSA-ключ из PEM-строки.
+    """Загружает приватный RSA-ключ из PEM-строки (кэшируется).
 
     Raises:
         ValueError: если PEM некорректен.
@@ -234,8 +236,9 @@ def load_private_key(pem: str) -> RSA.RsaKey:
         raise ValueError("Не удалось загрузить приватный ключ: некорректный PEM") from e
 
 
+@lru_cache(maxsize=128)
 def load_public_key(pem: str) -> RSA.RsaKey:
-    """Загружает публичный RSA-ключ из PEM-строки.
+    """Загружает публичный RSA-ключ из PEM-строки (кэшируется).
 
     Raises:
         ValueError: если PEM некорректен.
@@ -687,3 +690,44 @@ def derive_key_argon2(password: str, salt: bytes) -> bytes:
         hash_len=ARGON2_KEY_SIZE,
         type=Type.ID,
     )
+
+# ============================================================================
+# ДОПОЛНИТЕЛЬНАЯ ЗАЩИТА
+# ============================================================================
+
+import hmac as _hmac
+from Crypto.Hash import SHA256 as _SHA256
+
+# Константа для проверки целостности AAD-схем
+_AAD_SCHEMA_VERSION = b"pygram-aad-v2"
+
+
+def make_message_aad(chat_id: str, sender_fp16: str, ts: int, msg_id: str = "") -> bytes:
+    """Единая схема AAD для сообщений (v2).
+
+    Включает msg_id и схему версии — защита от replay и подмены контекста.
+    """
+    base = f"chat_id={chat_id}|sender={sender_fp16}|ts={ts}".encode("utf-8")
+    if msg_id:
+        base += b"|msg_id=" + msg_id.encode("utf-8")
+    return _AAD_SCHEMA_VERSION + b"|" + base
+
+
+def constant_time_compare(a: bytes, b: bytes) -> bool:
+    """Timing-safe сравнение байт."""
+    if not isinstance(a, (bytes, bytearray)) or not isinstance(b, (bytes, bytearray)):
+        raise TypeError("constant_time_compare expects bytes")
+    return _hmac.compare_digest(bytes(a), bytes(b))
+
+
+def wipe_bytes(buf: bytearray) -> None:
+    """Затирает буфер в памяти (best-effort)."""
+    if isinstance(buf, bytearray):
+        for i in range(len(buf)):
+            buf[i] = 0
+
+
+def derive_session_key_argon2(password: str, salt: bytes) -> bytearray:
+    """Возвращает ключ как bytearray (можно затереть)."""
+    raw = derive_key_argon2(password, salt)
+    return bytearray(raw)
