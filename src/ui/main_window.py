@@ -353,11 +353,26 @@ class MainWindow(QMainWindow):
 
         if theme == "custom":
             bg_color = db.get_setting("color_bg", "#1a1a2e")
+            chat_bg = db.get_setting("color_chat_bg", "#1a1a2e")
 
-            self.setStyleSheet(f"QMainWindow {{ background-color: {bg_color}; }}")
-            self.centralWidget().setStyleSheet(f"QWidget#main_window_bg {{ background-color: {bg_color}; }}")
-            self.sidebar.setStyleSheet(f"#sidebar {{ background-color: {bg_color}; border-right: 1px solid #2a2a2a; }}")
-            self.chat_list.list_widget.setStyleSheet(f"QListWidget {{ background-color: {bg_color}; }}")
+            # Красим всё окно
+            self.setStyleSheet(f"""
+                QMainWindow {{ background-color: {bg_color}; }}
+                QWidget#main_window_bg {{ background-color: {bg_color}; }}
+                #sidebar {{ background-color: {bg_color}; border-right: 1px solid #2a2a2a; }}
+                QListWidget {{ background-color: {bg_color}; border: none; }}
+            """)
+
+            # Красим фон списка сообщений напрямую
+            self.chat_view.messages_list.setStyleSheet(f"""
+                QListWidget {{
+                    background-color: {chat_bg};
+                    border: none;
+                    outline: none;
+                }}
+                QListWidget::item {{ padding: 0px; margin: 0px; }}
+                QListWidget::item:selected {{ background: transparent; }}
+            """)
 
             if self.chat_view.current_chat_id:
                 self.chat_view.load_chat(self.chat_view.current_chat_id)
@@ -366,5 +381,14 @@ class MainWindow(QMainWindow):
             self.centralWidget().setStyleSheet("")
             self.sidebar.setStyleSheet("")
             self.chat_list.list_widget.setStyleSheet("")
+            self.chat_view.messages_list.setStyleSheet("""
+                QListWidget {
+                    background-color: transparent;
+                    border: none;
+                    outline: none;
+                }
+                QListWidget::item { padding: 0px; margin: 0px; }
+                QListWidget::item:selected { background: transparent; }
+            """)
             if self.chat_view.current_chat_id:
                 self.chat_view.load_chat(self.chat_view.current_chat_id)

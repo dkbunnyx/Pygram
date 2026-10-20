@@ -232,7 +232,6 @@ class ChatViewWidget(QWidget):
             self._reaction_msg_id = None
 
     def _view_image(self, file_path: str):
-        """Открывает изображение через системное приложение."""
         if os.path.exists(file_path):
             os.startfile(file_path)
 
@@ -243,7 +242,6 @@ class ChatViewWidget(QWidget):
         reactions = get_reactions(self.shared_folder, self.current_chat_id, msg_id)
         my_reaction = reactions.get(self.user.fp16)
 
-        # Ищем виджет, чтобы понять, картинка ли это
         is_img = False
         img_path = None
         for i in range(self.messages_list.count()):
@@ -277,13 +275,10 @@ class ChatViewWidget(QWidget):
 
     def _show_delete_menu(self, msg_id: str):
         menu = QMenu(self)
-
         action_self = menu.addAction("Удалить у себя")
         action_self.triggered.connect(lambda: self._delete_message(msg_id, for_everyone=False))
-
         action_all = menu.addAction("Удалить у обоих")
         action_all.triggered.connect(lambda: self._delete_message(msg_id, for_everyone=True))
-
         menu.exec(self.cursor().pos())
 
     def _delete_message(self, msg_id: str, for_everyone: bool):
@@ -323,6 +318,42 @@ class ChatViewWidget(QWidget):
         self.current_chat_id = chat_id
         self.messages_list.clear()
 
+        # --- ФОН ОКНА СООБЩЕНИЙ ---
+        db = LocalDB()
+        theme = db.get_setting("theme", "base")
+        if theme == "custom":
+            chat_bg = db.get_setting("color_chat_bg", "#1a1a2e")
+            self.messages_list.setStyleSheet(f"""
+                QListWidget {{
+                    background-color: {chat_bg};
+                    border: none;
+                    outline: none;
+                }}
+                QListWidget::item {{
+                    padding: 0px;
+                    margin: 0px;
+                }}
+                QListWidget::item:selected {{
+                    background: transparent;
+                }}
+            """)
+        else:
+            self.messages_list.setStyleSheet("""
+                QListWidget {
+                    background-color: transparent;
+                    border: none;
+                    outline: none;
+                }
+                QListWidget::item {
+                    padding: 0px;
+                    margin: 0px;
+                }
+                QListWidget::item:selected {
+                    background: transparent;
+                }
+            """)
+        # ---------------------------
+
         self.avatar_label.setVisible(False)
         self.avatar_label.clear()
         self.avatar_label.setStyleSheet("")
@@ -335,7 +366,6 @@ class ChatViewWidget(QWidget):
             meta = get_chat_meta(self.shared_folder, chat_id)
             chat_type = meta["type"]
 
-            db = LocalDB()
             profile_dir = Path(self.shared_folder) / ".profiles"
 
             font_family = db.get_setting("font_family", "Segoe UI")
@@ -446,7 +476,6 @@ class ChatViewWidget(QWidget):
                         parts.append(f"{emoji} {count}")
                     reactions_html = ' '.join(parts)
 
-                # Определяем, картинка ли это
                 is_img = False
                 img_path = None
 
@@ -470,6 +499,12 @@ class ChatViewWidget(QWidget):
                         file_url = QUrl.fromLocalFile(str(file_path)).toString()
                         display_text = f'<a href="{file_url}" style="color: #89b4fa;">📥 {display_name}</a>'
 
+                # Берем цвета пузырей из настроек
+                if theme == "custom":
+                    bg_color = db.get_setting("color_my_msg", "#4a90e2") if is_me else db.get_setting("color_other_msg", "#2b2b3d")
+                else:
+                    bg_color = "#4a90e2" if is_me else "#2b2b3d"
+
                 widget = MessageWidget(
                     msg_id=msg.msg_id,
                     sender_name=sender_name,
@@ -480,7 +515,8 @@ class ChatViewWidget(QWidget):
                     reactions_html=reactions_html,
                     font_size=font_size,
                     is_image=is_img,
-                    file_path=img_path
+                    file_path=img_path,
+                    bg_color=bg_color
                 )
                 widget.clicked.connect(self._on_message_clicked)
                 widget.double_clicked.connect(self._on_message_double_clicked)
