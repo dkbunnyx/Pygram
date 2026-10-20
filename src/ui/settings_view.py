@@ -24,7 +24,7 @@ class SettingsView(QWidget):
 
     def _setup_ui(self):
         self.setWindowTitle("Настройки Pygram")
-        self.resize(600, 600)
+        self.resize(600, 650)
 
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
@@ -88,6 +88,17 @@ class SettingsView(QWidget):
         p_layout.addWidget(QLabel("Подсказка в поле ввода:"))
         self.input_placeholder = QLineEdit()
         p_layout.addWidget(self.input_placeholder)
+
+        # --- ЭМОДЗИ ДЛЯ КНОПКИ ---
+        p_layout.addWidget(QLabel("Эмодзи для кнопки чата:"))
+        emoji_row = QHBoxLayout()
+        self.btn_emoji_picker = QPushButton("😊")
+        self.btn_emoji_picker.setFixedSize(50, 40)
+        self.btn_emoji_picker.clicked.connect(self._on_pick_emoji)
+        emoji_row.addWidget(self.btn_emoji_picker)
+        emoji_row.addStretch()
+        p_layout.addLayout(emoji_row)
+
         p_layout.addStretch()
 
         self.tabs.addTab(self.tab_personal, "🎨 Персонализация")
@@ -140,6 +151,9 @@ class SettingsView(QWidget):
 
         self._on_theme_changed(self.combo_theme.currentText())
 
+        # Загружаем эмодзи для кнопки
+        self.btn_emoji_picker.setText(db.get_setting("emoji_button", "😊"))
+
         self.accounts_list.clear()
         for acc in self.account_manager.accounts:
             prefix = "👉 " if acc.fp16 == self.user.fp16 else "    "
@@ -159,12 +173,26 @@ class SettingsView(QWidget):
             db.set_setting(setting_key, hex_color)
             self._update_btn_color(button, hex_color)
 
+    def _on_pick_emoji(self):
+        from src.ui.widgets.emoji_picker import EmojiPicker
+
+        picker = EmojiPicker()
+        picker.emoji_selected.connect(self._set_emoji_button)
+
+        pos = self.btn_emoji_picker.mapToGlobal(self.btn_emoji_picker.rect().bottomLeft())
+        picker.move(pos)
+        picker.show()
+
+    def _set_emoji_button(self, emoji: str):
+        self.btn_emoji_picker.setText(emoji)
+
     def _on_save(self):
         db = LocalDB()
         db.set_setting("font_family", self.combo_font.currentText())
         db.set_setting("font_size", str(self.spin_size.value()))
         db.set_setting("btn_text", self.input_btn_text.text() or "Отправить")
         db.set_setting("placeholder", self.input_placeholder.text() or "Введите сообщение...")
+        db.set_setting("emoji_button", self.btn_emoji_picker.text())
 
         theme_str = "custom" if "Пользовательская" in self.combo_theme.currentText() else "base"
         db.set_setting("theme", theme_str)

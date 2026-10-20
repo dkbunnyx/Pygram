@@ -1,0 +1,86 @@
+"""Виджет выбора эмодзи."""
+
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QGridLayout, QPushButton,
+    QScrollArea
+)
+from PySide6.QtCore import Qt, Signal
+
+
+class EmojiPicker(QWidget):
+    """Панель с эмодзи."""
+
+    emoji_selected = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.Popup)
+        self.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint)
+        self.setFixedSize(380, 450)
+        self.setStyleSheet("""
+            EmojiPicker {
+                background-color: #1a1a2e;
+                border: 1px solid #313148;
+                border-radius: 8px;
+            }
+            QPushButton {
+                background: transparent;
+                border: none;
+                font-size: 20px;
+                padding: 2px;
+            }
+            QPushButton:hover {
+                background-color: #313148;
+                border-radius: 4px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; }")
+
+        self.grid_widget = QWidget()
+        self.grid_layout = QGridLayout(self.grid_widget)
+        self.grid_layout.setSpacing(2)
+        scroll.setWidget(self.grid_widget)
+        layout.addWidget(scroll)
+
+        self._load_emojis()
+
+    def _load_emojis(self):
+        emojis = [
+            # Смайлы
+            "😀","😃","😄","😁","😆","😅","😂","🤣","🥲","😊","😇","🙂","🙃","😉","😌","😍",
+            "🥰","😘","😗","😙","😚","😋","😛","😝","😜","🤪","🤨","🧐","🤓","😎","🥸","🤩",
+            "🥳","😏","😒","😞","😔","😟","😕","🙁","☹️","😣","😖","😫","😩","🥺","😢","😭",
+            "😤","😠","😡","🤬","🤯","😳","🥵","🥶","😱","😨","😰","😥","😓","🤗","🤔","🫣",
+            "🤫","🤭","🫢","🫡","🤥","😶","😐","😑","😬","🙄","😯","😦","😧","😮","😲","🥱",
+            "😴","🤤","😪","😵","🤐","🥴","🤢","🤮","🤧","😷","🤒","🤕","🤑","🤠","😈","👿",
+            # Жесты и руки
+            "👍","👎","👌","🤌","🤏","✌️","🤞","🫰","🤟","🤘","🤙","👈","👉","👆","👇","☝️",
+            "👏","🙌","👐","🤲","🤝","🙏","✍️","💅","🤳","💪","🦾","🦵","🦶","👂","🦻","👃",
+            # Сердечки и символы
+            "❤️","🧡","💛","💚","💙","💜","🖤","🤍","🤎","💔","❣️","💕","💞","💓","💗","💖",
+            "💘","💝","💟","♥️","💯","💢","💥","💫","💦","💨","🕳️","💣","💬","👁️‍🗨️","🗨️","🗯️",
+            # Разное
+            "🔥","✨","🌟","⚡","☄️","🎉","🎊","🎈","🎁","🎂","🍕","🍔","🍟","🌭","🍿","🍩",
+            "☕","🍺","🍻","🥂","🍷","🥃","🍸","🍹","🧊","🥤","🧃","🍎","🍌","🍇","🍓","🍒"
+        ]
+
+        row, col = 0, 0
+        for emoji in emojis:
+            btn = QPushButton(emoji)
+            btn.setFixedSize(38, 38)
+            btn.clicked.connect(lambda checked=False, e=emoji: self._on_emoji_clicked(e))
+            self.grid_layout.addWidget(btn, row, col)
+
+            col += 1
+            if col >= 9:
+                col = 0
+                row += 1
+
+    def _on_emoji_clicked(self, emoji: str):
+        self.emoji_selected.emit(emoji)
+        self.hide()

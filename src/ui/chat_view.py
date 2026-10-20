@@ -21,6 +21,7 @@ from src.core.crypto import unwrap_key, aes_decrypt, from_base64
 from src.storage.local_db import LocalDB
 from src.storage.shared_store import chat_files_dir, chat_message_dir, load_chat_keys, load_chat_meta_enc
 from src.core.status import get_status, set_typing, mark_messages_read, get_read_messages
+from src.ui.widgets.emoji_picker import EmojiPicker
 
 
 class ImageConfirmDialog(QDialog):
@@ -61,17 +62,17 @@ class ChatViewWidget(QWidget):
         self._last_read_count = -1
         self._setup_ui()
 
-        # Таймер статуса (в сети/печатает)
+        self.emoji_picker = EmojiPicker()
+        self.emoji_picker.emoji_selected.connect(self._insert_emoji)
+
         self.status_timer = QTimer(self)
         self.status_timer.timeout.connect(self._update_status)
         self.status_timer.start(2000)
 
-        # Таймер обновления сообщений
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self._refresh_messages)
         self.refresh_timer.start(2000)
 
-        # Таймер сброса "печатает"
         self.typing_timer = QTimer(self)
         self.typing_timer.setSingleShot(True)
         self.typing_timer.timeout.connect(self._stop_typing)
@@ -119,18 +120,30 @@ class ChatViewWidget(QWidget):
         input_layout = QHBoxLayout(self.input_widget)
         input_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.btn_attach = QPushButton("📎")
-        self.btn_attach.setFixedSize(40, 40)
-        self.btn_attach.setCursor(Qt.PointingHandCursor)
-        self.btn_attach.clicked.connect(self._on_attach_clicked)
-        input_layout.addWidget(self.btn_attach)
+        # Кнопка эмодзи (слева)
+        db = LocalDB()
+        emoji_btn = db.get_setting("emoji_button", "😊")
+        self.btn_emoji = QPushButton(emoji_btn)
+        self.btn_emoji.setFixedSize(40, 40)
+        self.btn_emoji.setCursor(Qt.PointingHandCursor)
+        self.btn_emoji.clicked.connect(self._on_emoji_clicked)
+        input_layout.addWidget(self.btn_emoji)
 
+        # Поле ввода
         self.input_field = QLineEdit()
         self.input_field.setPlaceholderText("Введите сообщение...")
         self.input_field.returnPressed.connect(self._on_send_clicked)
         self.input_field.installEventFilter(self)
         input_layout.addWidget(self.input_field)
 
+        # Кнопка скрепки (между полем и кнопкой отправить)
+        self.btn_attach = QPushButton("📎")
+        self.btn_attach.setFixedSize(40, 40)
+        self.btn_attach.setCursor(Qt.PointingHandCursor)
+        self.btn_attach.clicked.connect(self._on_attach_clicked)
+        input_layout.addWidget(self.btn_attach)
+
+        # Кнопка отправить
         self.btn_send = QPushButton("Отправить")
         self.btn_send.clicked.connect(self._on_send_clicked)
         input_layout.addWidget(self.btn_send)
@@ -139,6 +152,20 @@ class ChatViewWidget(QWidget):
 
         self.input_widget.setVisible(False)
         self.text_browser.setHtml("<i style='color: gray;'>Выберите чат слева, чтобы начать переписку</i>")
+
+    def _on_emoji_clicked(self):
+        pos = self.btn_emoji.mapToGlobal(self.btn_emoji.rect().topLeft())
+        pos.setY(pos.y() - 450)
+        self.emoji_picker.move(pos)
+        self.emoji_picker.show()
+
+    def _insert_emoji(self, emoji: str):
+        current_text = self.input_field.text()
+        cursor_pos = self.input_field.cursorPosition()
+        new_text = current_text[:cursor_pos] + emoji + current_text[cursor_pos:]
+        self.input_field.setText(new_text)
+        self.input_field.setCursorPosition(cursor_pos + len(emoji))
+        self.input_field.setFocus()
 
     def load_chat(self, chat_id: str):
         self.current_chat_id = chat_id
@@ -227,13 +254,11 @@ class ChatViewWidget(QWidget):
                 self.text_browser.setHtml("<i>Нет сообщений. Напишите первым!</i>")
                 return
 
-            # Отмечаем сообщения от собеседника как прочитанные
             if self.current_other_fp:
                 incoming_ids = [m.msg_id for m in messages if m.sender_fp16 != self.user.fp16]
                 if incoming_ids:
                     mark_messages_read(self.shared_folder, chat_id, self.user.fp16, incoming_ids)
 
-            # Получаем прочитанные нами сообщения (галочки)
             read_by_other = []
             if self.current_other_fp:
                 read_by_other = get_read_messages(self.shared_folder, chat_id, self.current_other_fp)
@@ -277,7 +302,6 @@ class ChatViewWidget(QWidget):
                 time_str = dt.strftime("%H:%M")
                 time_color = "#aaaaaa" if not is_me else "#dddddd"
 
-                # Галочки
                 checkmark = ""
                 if is_me:
                     if msg.msg_id in read_by_other:

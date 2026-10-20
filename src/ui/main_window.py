@@ -334,8 +334,11 @@ class MainWindow(QMainWindow):
 
         btn_text = db.get_setting("btn_text", "Отправить")
         placeholder = db.get_setting("placeholder", "Введите сообщение...")
+        emoji_btn = db.get_setting("emoji_button", "😊")
+
         self.chat_view.btn_send.setText(btn_text)
         self.chat_view.input_field.setPlaceholderText(placeholder)
+        self.chat_view.btn_emoji.setText(emoji_btn)
 
         theme = db.get_setting("theme", "base")
 
