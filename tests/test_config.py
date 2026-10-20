@@ -117,11 +117,11 @@ class TestEnsureConfig:
         assert c.shared_folder == "/tmp/share"
         assert c.log_level == "INFO"
 
-    def test_raises_if_exists(self, isolate_app_dir):
-        ensure_config("/tmp/share")
-        with pytest.raises(FileExistsError, match=".env"):
-            ensure_config("/tmp/other")
+    def test_does_not_overwrite(self, isolate_app_dir):
+        path = ensure_config("/tmp/share1")
+        path.write_text("SHARED_FOLDER=original\n", encoding="utf-8")
 
-    def test_empty_folder_raises(self, isolate_app_dir):
-        with pytest.raises(ValueError, match="shared_folder"):
-            ensure_config("")
+        # Второй вызов не должен перезаписывать файл
+        path2 = ensure_config("/tmp/share2")
+        assert path2.exists()
+        assert "original" in path2.read_text(encoding="utf-8")

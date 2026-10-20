@@ -15,10 +15,13 @@ class MessageWidget(QWidget):
 
     def __init__(self, msg_id: str, sender_name: str, text_html: str,
                  time_str: str, is_me: bool, avatar_path: str = None,
-                 reactions_html: str = "", font_size: int = 14, parent=None):
+                 reactions_html: str = "", font_size: int = 14,
+                 is_image: bool = False, file_path: str = None, parent=None):
         super().__init__(parent)
         self.msg_id = msg_id
         self.is_me = is_me
+        self.is_image = is_image
+        self.file_path = file_path
         self._setup_ui(sender_name, text_html, time_str, avatar_path, reactions_html, font_size)
 
     def _setup_ui(self, sender_name, text_html, time_str, avatar_path, reactions_html, font_size):
@@ -75,7 +78,6 @@ class MessageWidget(QWidget):
             }}
         """)
 
-        # Ограничиваем ширину баббла (70% от ширины экрана)
         self.text_label.setMaximumWidth(600)
 
         if self.is_me:

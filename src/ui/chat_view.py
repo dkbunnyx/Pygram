@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import json
+import os
 from datetime import datetime
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QDialog,
@@ -11,7 +12,6 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QUrl, QEvent, QTimer, QPoint
 from PySide6.QtGui import QDesktopServices, QKeySequence, QPixmap, QGuiApplication
 from loguru import logger
-import os
 import tempfile
 import shutil
 import sys
@@ -231,12 +231,32 @@ class ChatViewWidget(QWidget):
         finally:
             self._reaction_msg_id = None
 
+    def _view_image(self, file_path: str):
+        """Открывает изображение через системное приложение."""
+        if os.path.exists(file_path):
+            os.startfile(file_path)
+
     def _on_message_clicked(self, msg_id: str):
         menu = QMenu(self)
         db = LocalDB()
         quick_emoji = db.get_setting("quick_reaction", "❤️")
         reactions = get_reactions(self.shared_folder, self.current_chat_id, msg_id)
         my_reaction = reactions.get(self.user.fp16)
+
+        # Ищем виджет, чтобы понять, картинка ли это
+        is_img = False
+        img_path = None
+        for i in range(self.messages_list.count()):
+            item = self.messages_list.item(i)
+            w = self.messages_list.itemWidget(item)
+            if isinstance(w, MessageWidget) and w.msg_id == msg_id:
+                is_img = w.is_image
+                img_path = w.file_path
+                break
+
+        if is_img and img_path:
+            action_view = menu.addAction("🖼 Просмотреть изображение")
+            action_view.triggered.connect(lambda: self._view_image(img_path))
 
         if my_reaction:
             action_remove = menu.addAction(f"Убрать {my_reaction}")
@@ -261,7 +281,7 @@ class ChatViewWidget(QWidget):
         action_self = menu.addAction("Удалить у себя")
         action_self.triggered.connect(lambda: self._delete_message(msg_id, for_everyone=False))
 
-        action_all = menu.addAction("Удалить у всех")
+        action_all = menu.addAction("Удалить у обоих")
         action_all.triggered.connect(lambda: self._delete_message(msg_id, for_everyone=True))
 
         menu.exec(self.cursor().pos())
@@ -391,7 +411,6 @@ class ChatViewWidget(QWidget):
                 self.messages_list.addItem(item)
                 return
 
-            # Помечаем ВСЕ входящие сообщения как прочитанные (для любого типа чата)
             incoming_ids = [m.msg_id for m in messages if m.sender_fp16 != self.user.fp16]
             if incoming_ids:
                 mark_messages_read(self.shared_folder, chat_id, self.user.fp16, incoming_ids)
@@ -427,6 +446,10 @@ class ChatViewWidget(QWidget):
                         parts.append(f"{emoji} {count}")
                     reactions_html = ' '.join(parts)
 
+                # Определяем, картинка ли это
+                is_img = False
+                img_path = None
+
                 display_text = msg.text
                 if msg.text.startswith("[FILE]") and msg.text.endswith("[/FILE]"):
                     inner = msg.text[6:-7]
@@ -439,6 +462,8 @@ class ChatViewWidget(QWidget):
                     ext = display_name.lower().split('.')[-1]
 
                     if ext in ('png', 'jpg', 'jpeg', 'gif', 'bmp'):
+                        is_img = True
+                        img_path = str(file_path)
                         file_url = QUrl.fromLocalFile(str(file_path)).toString()
                         display_text = f'<a href="{file_url}"><img src="{file_url}" width="200" /></a>'
                     else:
@@ -453,7 +478,9 @@ class ChatViewWidget(QWidget):
                     is_me=is_me,
                     avatar_path=avatar_path_str,
                     reactions_html=reactions_html,
-                    font_size=font_size
+                    font_size=font_size,
+                    is_image=is_img,
+                    file_path=img_path
                 )
                 widget.clicked.connect(self._on_message_clicked)
                 widget.double_clicked.connect(self._on_message_double_clicked)

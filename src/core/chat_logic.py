@@ -98,7 +98,8 @@ def create_group_chat(shared_folder: Path | str, creator_login: str, name: str, 
     meta_enc = {
         "name": name, "description": "", "members": fp16s,
         "admins": [creator_fp16], "created_by": creator_fp16,
-        "creator_fp16": creator_fp16,  # <--- ДОБАВЛЕНО
+        "creator_fp16": creator_fp16,
+        "member_permissions": {},  # <--- ДОБАВЛЕНО
         "pinned_message": None, "public": False,
     }
 
@@ -228,3 +229,122 @@ def get_all_users_fp16(shared_folder: Path | str) -> list[str]:
     keys_dir = Path(shared_folder) / ".keys"
     if not keys_dir.is_dir(): return []
     return [f.name.replace(".pub.pem", "") for f in keys_dir.glob("*.pub.pem")]
+
+
+# ============================================================================
+# УПРАВЛЕНИЕ УЧАСТНИКАМИ ГРУППЫ
+# ============================================================================
+
+def _load_group_meta(shared_folder: Path | str, chat_id: str, by_fp16: str, by_priv_pem: str) -> tuple[dict, bytes, dict]:
+    """Загружает метаданные группы (расшифровывает)."""
+    from src.core.crypto import unwrap_key, aes_decrypt, from_base64
+    from src.storage.shared_store import load_chat_keys, load_chat_meta_enc
+
+    keys = load_chat_keys(shared_folder, chat_id)
+    wrapped = keys.get("wrapped", {})
+    if by_fp16 not in wrapped:
+        raise ValueError("У вас нет доступа к группе")
+
+    group_key = unwrap_key(wrapped, by_fp16, by_priv_pem)
+    enc = load_chat_meta_enc(shared_folder, chat_id)
+    data = json.loads(enc.decode("utf-8"))
+    aad = f"chat_id={chat_id}|meta".encode("utf-8")
+    decrypted = aes_decrypt(group_key, from_base64(data["nonce"]), from_base64(data["ciphertext"]), aad=aad)
+    meta = json.loads(decrypted.decode("utf-8"))
+
+    return meta, group_key, keys
+
+
+def _save_group_meta(shared_folder: Path | str, chat_id: str, meta: dict, group_key: bytes):
+    """Сохраняет метаданные группы (шифрует)."""
+    from src.core.crypto import aes_encrypt, to_base64
+    from src.storage.shared_store import save_chat_meta_enc
+
+    aad = f"chat_id={chat_id}|meta".encode("utf-8")
+    nonce, ct = aes_encrypt(group_key, json.dumps(meta).encode("utf-8"), aad=aad)
+    save_chat_meta_enc(shared_folder, chat_id, json.dumps({"nonce": to_base64(nonce), "ciphertext": to_base64(ct)}).encode("utf-8"))
+
+
+def remove_group_member(shared_folder: Path | str, chat_id: str, target_fp16: str, by_fp16: str, by_priv_pem: str) -> None:
+    """Удаляет участника из группы."""
+    from src.storage.shared_store import save_chat_keys
+
+    meta, group_key, keys = _load_group_meta(shared_folder, chat_id, by_fp16, by_priv_pem)
+
+    is_creator = (meta.get("creator_fp16") == by_fp16)
+    perms = meta.get("member_permissions", {}).get(by_fp16, {})
+    can_remove = perms.get("can_remove_members", False)
+
+    if not is_creator and not can_remove:
+        raise ValueError("У вас нет прав на удаление участников")
+
+    if target_fp16 == meta.get("creator_fp16"):
+        raise ValueError("Нельзя удалить создателя группы")
+
+    if target_fp16 not in meta.get("members", []):
+        raise ValueError("Этот пользователь не в группе")
+
+    meta["members"] = [m for m in meta["members"] if m != target_fp16]
+    meta["admins"] = [a for a in meta.get("admins", []) if a != target_fp16]
+    if "member_permissions" in meta:
+        meta["member_permissions"].pop(target_fp16, None)
+
+    wrapped = keys.get("wrapped", {})
+    if target_fp16 in wrapped:
+        del wrapped[target_fp16]
+        save_chat_keys(shared_folder, chat_id, {"version": 1, "wrapped": wrapped})
+
+    _save_group_meta(shared_folder, chat_id, meta, group_key)
+
+
+def toggle_group_admin(shared_folder: Path | str, chat_id: str, target_fp16: str, by_fp16: str, by_priv_pem: str) -> None:
+    """Назначает/снимает админа группы (только создатель)."""
+    meta, group_key, keys = _load_group_meta(shared_folder, chat_id, by_fp16, by_priv_pem)
+
+    if meta.get("creator_fp16") != by_fp16:
+        raise ValueError("Только создатель может менять админов")
+
+    if target_fp16 not in meta.get("members", []):
+        raise ValueError("Этот пользователь не в группе")
+
+    if target_fp16 in meta.get("admins", []):
+        meta["admins"] = [a for a in meta["admins"] if a != target_fp16]
+    else:
+        if "admins" not in meta:
+            meta["admins"] = []
+        meta["admins"].append(target_fp16)
+
+    _save_group_meta(shared_folder, chat_id, meta, group_key)
+
+
+def toggle_group_permission(shared_folder: Path | str, chat_id: str, target_fp16: str, perm: str, by_fp16: str, by_priv_pem: str) -> None:
+    """Меняет права участника (только создатель)."""
+    meta, group_key, keys = _load_group_meta(shared_folder, chat_id, by_fp16, by_priv_pem)
+
+    if meta.get("creator_fp16") != by_fp16:
+        raise ValueError("Только создатель может менять права")
+
+    if target_fp16 not in meta.get("members", []):
+        raise ValueError("Этот пользователь не в группе")
+
+    if "member_permissions" not in meta:
+        meta["member_permissions"] = {}
+    if target_fp16 not in meta["member_permissions"]:
+        meta["member_permissions"][target_fp16] = {}
+
+    current = meta["member_permissions"][target_fp16].get(perm, False)
+    meta["member_permissions"][target_fp16][perm] = not current
+
+    _save_group_meta(shared_folder, chat_id, meta, group_key)
+
+
+def can_edit_group_profile(shared_folder: Path | str, chat_id: str, fp16: str, priv_pem: str) -> bool:
+    """Может ли пользователь менять профиль группы?"""
+    try:
+        meta, _, _ = _load_group_meta(shared_folder, chat_id, fp16, priv_pem)
+        if meta.get("creator_fp16") == fp16:
+            return True
+        perms = meta.get("member_permissions", {}).get(fp16, {})
+        return perms.get("can_edit_profile", False)
+    except Exception:
+        return False

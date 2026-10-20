@@ -4,6 +4,8 @@ import pytest
 from src.core.admin import (
     admins_path, has_any_admin, is_admin, is_super,
     load_admins, make_admin, remove_admin, verify_signature,
+    can_read_all_chats, can_manage_admins,
+    toggle_manage_rights, toggle_read_rights,
 )
 from src.core.crypto import generate_rsa_keypair
 from src.storage.shared_store import ensure_shared_structure
@@ -71,7 +73,7 @@ class TestMakeAdmin:
         make_admin(shared, "a" * 16, by="system")
         make_admin(shared, "b" * 16, by="a" * 16, by_priv=priv)
         # Теперь "b" пытается назначить "c"
-        with pytest.raises(ValueError, match="Только супер-админ"):
+        with pytest.raises(ValueError, match="У вас нет прав"):
             make_admin(shared, "c" * 16, by="b" * 16, by_priv=priv)
 
 
@@ -100,7 +102,7 @@ class TestRemoveAdmin:
         make_admin(shared, "c" * 16, by="a" * 16, by_priv=priv)  # Ещё один обычный
 
         # "b" пытается снять "c" (но "b" не супер)
-        with pytest.raises(ValueError, match="Только супер-админ"):
+        with pytest.raises(ValueError, match="У вас нет прав"):
             remove_admin(shared, "c" * 16, by="b" * 16, by_priv=priv)
 
     def test_remove_nonexistent_raises(self, shared, keypair):
@@ -108,6 +110,45 @@ class TestRemoveAdmin:
         make_admin(shared, "a" * 16, by="system")
         with pytest.raises(ValueError, match="не админ"):
             remove_admin(shared, "b" * 16, by="a" * 16, by_priv=priv)
+
+
+class TestRights:
+    def test_can_read_all_chats_super(self, shared):
+        make_admin(shared, "a" * 16, by="system")
+        assert can_read_all_chats(shared, "a" * 16) is True
+
+    def test_can_read_all_chats_default_false(self, shared, keypair):
+        priv, _ = keypair
+        make_admin(shared, "a" * 16, by="system")
+        make_admin(shared, "b" * 16, by="a" * 16, by_priv=priv)
+        assert can_read_all_chats(shared, "b" * 16) is False
+
+    def test_toggle_read_rights(self, shared, keypair):
+        priv, _ = keypair
+        make_admin(shared, "a" * 16, by="system")
+        make_admin(shared, "b" * 16, by="a" * 16, by_priv=priv)
+
+        toggle_read_rights(shared, "b" * 16, by="a" * 16)
+        assert can_read_all_chats(shared, "b" * 16) is True
+
+        toggle_read_rights(shared, "b" * 16, by="a" * 16)
+        assert can_read_all_chats(shared, "b" * 16) is False
+
+    def test_toggle_manage_rights(self, shared, keypair):
+        priv, _ = keypair
+        make_admin(shared, "a" * 16, by="system")
+        make_admin(shared, "b" * 16, by="a" * 16, by_priv=priv)
+
+        toggle_manage_rights(shared, "b" * 16, by="a" * 16)
+        assert can_manage_admins(shared, "b" * 16) is True
+
+    def test_toggle_rights_only_super(self, shared, keypair):
+        priv, _ = keypair
+        make_admin(shared, "a" * 16, by="system")
+        make_admin(shared, "b" * 16, by="a" * 16, by_priv=priv)
+
+        with pytest.raises(ValueError, match="Только супер-админ"):
+            toggle_read_rights(shared, "b" * 16, by="b" * 16)
 
 
 class TestVerifySignature:

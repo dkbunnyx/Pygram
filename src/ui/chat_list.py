@@ -15,6 +15,7 @@ from src.storage.local_db import LocalDB
 from src.core.crypto import unwrap_key, aes_decrypt, from_base64
 from src.storage.shared_store import load_chat_keys, load_chat_meta_enc
 from src.core.status import get_unread_count
+from src.os_integration.notifications import show_notification
 
 
 class ChatListWidget(QWidget):
@@ -30,6 +31,7 @@ class ChatListWidget(QWidget):
         self.user_priv_pem = user_priv_pem
         self.user_is_admin = user_is_admin
         self.profile_dir = Path(shared_folder) / ".profiles"
+        self._last_unread = {}  # <--- ДЛЯ УВЕДОМЛЕНИЙ
         self._setup_ui()
         self.refresh_chats()
 
@@ -89,6 +91,7 @@ class ChatListWidget(QWidget):
             else:
                 for chat in chats:
                     self._add_chat_item(chat)
+                self._check_new_messages(chats)  # <--- ПРОВЕРКА УВЕДОМЛЕНИЙ
 
             if self.user_is_admin:
                 header_all = QListWidgetItem("СПИСОК ВСЕХ ЧАТОВ (АДМИН)")
@@ -145,11 +148,9 @@ class ChatListWidget(QWidget):
         elif chat_type == "admin_chat":
             display_name = "🛡 Админ-чат"
 
-        # --- СЧЕТЧИК НЕПРОЧИТАННЫХ ---
         unread = get_unread_count(self.shared_folder, chat_id, self.user_fp16)
         if unread > 0:
             display_name = f"{display_name} ({unread})"
-        # ------------------------------
 
         text = f"{prefix}{display_name}"
         item = QListWidgetItem(text)
@@ -159,6 +160,40 @@ class ChatListWidget(QWidget):
 
         item.setData(Qt.UserRole, chat_id)
         self.list_widget.addItem(item)
+
+    def _check_new_messages(self, chats: list[dict]):
+        """Проверяет новые сообщения и показывает уведомления."""
+        db = LocalDB()
+        for chat in chats:
+            chat_id = chat["chat_id"]
+            unread = get_unread_count(self.shared_folder, chat_id, self.user_fp16)
+
+            old_count = self._last_unread.get(chat_id, 0)
+            if unread > old_count:
+                chat_type = chat["type"]
+                if chat_type == "dm":
+                    parts = chat_id.replace("dm_", "").split("__")
+                    if len(parts) == 2:
+                        fp1, fp2 = parts
+                        other_fp = fp1 if fp2 == self.user_fp16 else fp2
+                        title = db.get_login_by_fp16(other_fp)
+                    else:
+                        title = "Личный чат"
+                elif chat_type == "group":
+                    title = self._get_group_name(chat_id)
+                elif chat_type == "favorites":
+                    title = "Избранное"
+                elif chat_type == "admin_chat":
+                    title = "Админ-чат"
+                else:
+                    title = chat_id
+
+                show_notification(
+                    title=title,
+                    message=f"Новых сообщений: {unread}",
+                )
+
+            self._last_unread[chat_id] = unread
 
     def _on_item_clicked(self, item: QListWidgetItem):
         chat_id = item.data(Qt.UserRole)

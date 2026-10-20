@@ -4,7 +4,7 @@ from pathlib import Path
 import json
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QLineEdit, QFileDialog, QMessageBox, QListWidget, QListWidgetItem
+    QLineEdit, QFileDialog, QMessageBox, QListWidget, QListWidgetItem, QMenu
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
@@ -13,6 +13,9 @@ from loguru import logger
 from src.storage.local_db import LocalDB
 from src.core.crypto import unwrap_key, aes_encrypt, to_base64, from_base64, aes_decrypt
 from src.storage.shared_store import load_chat_keys, load_chat_meta_enc, save_chat_meta_enc
+from src.core.chat_logic import (
+    remove_group_member, toggle_group_admin, toggle_group_permission, can_edit_group_profile
+)
 
 
 class GroupSettingsView(QWidget):
@@ -91,7 +94,7 @@ class GroupSettingsView(QWidget):
             rename_layout.addWidget(btn_rename)
             layout.addLayout(rename_layout)
 
-        layout.addWidget(QLabel("<b>Участники (нажмите для просмотра профиля):</b>"))
+        layout.addWidget(QLabel("<b>Участники (ПКМ — действия):</b>"))
 
         self.list_widget = QListWidget()
         db = LocalDB()
@@ -103,12 +106,13 @@ class GroupSettingsView(QWidget):
             role = " (Админ)" if m in admins else ""
             if m == self.user.fp16:
                 role += " (Вы)"
-
             item = QListWidgetItem(f"{login}{role}")
             item.setData(Qt.UserRole, m)
             self.list_widget.addItem(item)
 
         self.list_widget.itemClicked.connect(self._on_member_clicked)
+        self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list_widget.customContextMenuRequested.connect(self._on_member_context_menu)
         layout.addWidget(self.list_widget)
 
     def _on_member_clicked(self, item):
@@ -118,9 +122,71 @@ class GroupSettingsView(QWidget):
             self.profile_window = ProfileView(self.shared_folder, self.user, target_fp16=fp16)
             self.profile_window.show()
 
+    def _on_member_context_menu(self, pos):
+        item = self.list_widget.itemAt(pos)
+        if not item:
+            return
+        target_fp16 = item.data(Qt.UserRole)
+        if not target_fp16 or target_fp16 == self.user.fp16:
+            return
+
+        menu = QMenu(self)
+
+        if self.is_creator:
+            # Назначить/снять админа
+            if target_fp16 in self.meta.get("admins", []):
+                action_admin = menu.addAction("Снять админа")
+            else:
+                action_admin = menu.addAction("Назначить админом")
+            action_admin.triggered.connect(lambda: self._toggle_admin(target_fp16))
+
+            # Права (только если админ)
+            if target_fp16 in self.meta.get("admins", []):
+                perms = self.meta.get("member_permissions", {}).get(target_fp16, {})
+                can_edit = perms.get("can_edit_profile", False)
+                can_remove = perms.get("can_remove_members", False)
+
+                menu.addSeparator()
+                action_edit = menu.addAction(f"{'✅' if can_edit else '❌'} Может менять профиль")
+                action_edit.triggered.connect(lambda: self._toggle_perm(target_fp16, "can_edit_profile"))
+
+                action_remove = menu.addAction(f"{'✅' if can_remove else '❌'} Может удалять участников")
+                action_remove.triggered.connect(lambda: self._toggle_perm(target_fp16, "can_remove_members"))
+
+        # Удалить из группы
+        if self.is_creator or self.meta.get("member_permissions", {}).get(self.user.fp16, {}).get("can_remove_members", False):
+            menu.addSeparator()
+            action_delete = menu.addAction("Удалить из группы")
+            action_delete.triggered.connect(lambda: self._remove_member(target_fp16))
+
+        menu.exec(self.list_widget.mapToGlobal(pos))
+
+    def _toggle_admin(self, target_fp16: str):
+        try:
+            toggle_group_admin(self.shared_folder, self.chat_id, target_fp16, self.user.fp16, self.user.priv_pem)
+            self.close()
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", str(e))
+
+    def _toggle_perm(self, target_fp16: str, perm: str):
+        try:
+            toggle_group_permission(self.shared_folder, self.chat_id, target_fp16, perm, self.user.fp16, self.user.priv_pem)
+            self.close()
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", str(e))
+
+    def _remove_member(self, target_fp16: str):
+        reply = QMessageBox.question(self, "Удаление", "Удалить участника из группы?")
+        if reply == QMessageBox.Yes:
+            try:
+                remove_group_member(self.shared_folder, self.chat_id, target_fp16, self.user.fp16, self.user.priv_pem)
+                self.close()
+            except Exception as e:
+                QMessageBox.warning(self, "Ошибка", str(e))
+
     def _on_change_avatar(self, event):
-        if not self.is_creator:
-            QMessageBox.warning(self, "Ошибка", "Только создатель группы может менять аватарку.")
+        if not (self.is_creator or can_edit_group_profile(self.shared_folder, self.chat_id, self.user.fp16, self.user.priv_pem)):
+            QMessageBox.warning(self, "Ошибка", "У вас нет прав на изменение профиля группы.")
             return
 
         file_path, _ = QFileDialog.getOpenFileName(self, "Выберите аватарку группы", "", "Images (*.png *.jpg *.jpeg)")
@@ -151,7 +217,7 @@ class GroupSettingsView(QWidget):
             self.close()
 
     def _on_rename(self):
-        if not self.is_creator:
+        if not (self.is_creator or can_edit_group_profile(self.shared_folder, self.chat_id, self.user.fp16, self.user.priv_pem)):
             return
 
         new_name = self.input_name.text().strip()

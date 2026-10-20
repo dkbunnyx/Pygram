@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QFrame, QDialog, QListWidget,
     QListWidgetItem, QApplication, QMessageBox, QMenu
 )
-from PySide6.QtCore import Qt, QSize, QRectF
+from PySide6.QtCore import Qt, QSize, QRectF, QTimer
 from PySide6.QtGui import QPixmap, QIcon, QPainter, QBrush
 
 from config import get_config
@@ -76,6 +76,11 @@ class MainWindow(QMainWindow):
         self.main_layout.addWidget(self.splitter)
         self.setCentralWidget(central)
         self._on_settings_saved()
+
+        # Таймер для проверки новых сообщений и уведомлений
+        self.notification_timer = QTimer(self)
+        self.notification_timer.timeout.connect(self.chat_list.refresh_chats)
+        self.notification_timer.start(5000)
 
     def _on_chat_selected(self, chat_id: str):
         """Загружает чат и обновляет список (чтобы убрать счетчик)."""
