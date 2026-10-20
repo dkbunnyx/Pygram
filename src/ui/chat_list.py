@@ -48,7 +48,7 @@ class ChatListWidget(QWidget):
 
         self.list_widget = QListWidget()
         self.list_widget.setObjectName("chat_list")
-        self.list_widget.setIconSize(QSize(24, 24)) # Размер аватарки в списке
+        self.list_widget.setIconSize(QSize(24, 24))
         self.list_widget.itemClicked.connect(self._on_item_clicked)
         layout.addWidget(self.list_widget)
 
@@ -123,7 +123,6 @@ class ChatListWidget(QWidget):
                 if display_name == other_fp[:8]:
                     display_name = f"Чат {other_fp[:8]}"
 
-                # Пытаемся загрузить аватарку
                 avatar_path = self.profile_dir / f"{other_fp}.png"
                 if avatar_path.exists():
                     icon = QIcon(str(avatar_path))
@@ -133,10 +132,17 @@ class ChatListWidget(QWidget):
         elif chat_type == "group":
             display_name = self._get_group_name(chat_id)
 
+            avatar_path = self.profile_dir / f"{chat_id}.png"
+            if avatar_path.exists():
+                icon = QIcon(str(avatar_path))
+            else:
+                display_name = f"👥 {display_name}"
+
         elif chat_type == "favorites":
-            display_name = f"Избранное ({db.get_login_by_fp16(chat_id.replace('fav_', ''))})" if prefix else "Избранное"
+            display_name = "⭐ Избранное"
+
         elif chat_type == "admin_chat":
-            display_name = "Админ-чат"
+            display_name = "🛡 Админ-чат"
 
         text = f"{prefix}{display_name}"
         item = QListWidgetItem(text)

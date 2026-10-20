@@ -117,9 +117,11 @@ class ChatViewWidget(QWidget):
         self.current_chat_id = chat_id
         self.text_browser.clear()
 
-        # Очистка аватарки в заголовке
+        # Скрываем аватарку по умолчанию
+        self.avatar_label.setVisible(False)
         self.avatar_label.clear()
         self.avatar_label.setStyleSheet("")
+        self.avatar_label.setCursor(Qt.ArrowCursor)  # Обычный курсор
 
         self.input_widget.setVisible(True)
 
@@ -135,19 +137,21 @@ class ChatViewWidget(QWidget):
 
             self.current_other_fp = None
 
+            # --- ЛОГИКА ОТОБРАЖЕНИЯ АВАТАРКИ ---
             if chat_type == "dm":
                 parts = chat_id.replace("dm_", "").split("__")
                 if len(parts) == 2:
                     fp1, fp2 = parts
                     self.current_other_fp = fp1 if fp2 == self.user.fp16 else fp2
                     other_login = db.get_login_by_fp16(self.current_other_fp)
-                    title = other_login  # БЕЗ СМАЙЛИКА
+                    title = other_login
 
                     avatar_path = profile_dir / f"{self.current_other_fp}.png"
                     if avatar_path.exists():
                         pixmap = QPixmap(str(avatar_path))
                         self.avatar_label.setPixmap(pixmap.scaled(36, 36, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                    # Если нет аватарки — пусто (ничего не ставим)
+                        self.avatar_label.setVisible(True)
+                        self.avatar_label.setCursor(Qt.PointingHandCursor)
                 else:
                     title = "Личный чат"
 
@@ -163,15 +167,21 @@ class ChatViewWidget(QWidget):
 
                         if "nonce" in data and "ciphertext" in data:
                             aad = f"chat_id={chat_id}|meta".encode("utf-8")
-                            decrypted = aes_decrypt(group_key, from_base64(data["nonce"]), from_base64(data["ciphertext"]), aad=aad)
+                            decrypted = aes_decrypt(group_key, from_base64(data["nonce"]),
+                                                    from_base64(data["ciphertext"]), aad=aad)
                             meta_group = json.loads(decrypted.decode("utf-8"))
                             group_name = meta_group.get("name", group_name)
                 except Exception as e:
                     logger.error(f"Не удалось расшифровать имя группы: {e}")
 
-                title = group_name  # БЕЗ СМАЙЛИКА
-                # Для группы можно поставить иконку группы, но ты сказал убрать смайлик
-                # Оставляем пусто, если нет картинки
+                title = group_name
+
+                group_avatar_path = profile_dir / f"{chat_id}.png"
+                if group_avatar_path.exists():
+                    pixmap = QPixmap(str(group_avatar_path))
+                    self.avatar_label.setPixmap(pixmap.scaled(36, 36, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                    self.avatar_label.setVisible(True)
+                    self.avatar_label.setCursor(Qt.PointingHandCursor)
 
             elif chat_type == "favorites":
                 title = "Избранное"
@@ -220,15 +230,12 @@ class ChatViewWidget(QWidget):
 
                 sender_name = "Вы" if is_me else db.get_login_by_fp16(msg.sender_fp16)
 
-                # Аватарка в сообщении: если есть — показываем, если нет — НИЧЕГО
                 avatar_html = ""
                 sender_avatar_path = profile_dir / f"{msg.sender_fp16}.png"
                 if sender_avatar_path.exists():
                     avatar_url = QUrl.fromLocalFile(str(sender_avatar_path)).toString()
                     avatar_html = f"<img src='{avatar_url}' width='20' height='20' style='border-radius: 10px;' />&nbsp;"
-                # Если нет — avatar_html пустой (без смайлика)
 
-                # Обработка файлов
                 display_text = msg.text
                 if msg.text.startswith("[FILE]") and msg.text.endswith("[/FILE]"):
                     inner = msg.text[6:-7]
@@ -276,10 +283,18 @@ class ChatViewWidget(QWidget):
             self.text_browser.setHtml(f"<b style='color: red;'>Ошибка загрузки сообщений</b><br>{e}")
 
     def _on_avatar_clicked(self, event):
-        if self.current_other_fp:
+        if not self.current_chat_id:
+            return
+
+        meta = get_chat_meta(self.shared_folder, self.current_chat_id)
+        if meta["type"] == "dm" and self.current_other_fp:
             from src.ui.profile_view import ProfileView
             self.profile_window = ProfileView(self.shared_folder, self.user, target_fp16=self.current_other_fp)
             self.profile_window.show()
+        elif meta["type"] == "group":
+            from src.ui.group_settings_view import GroupSettingsView
+            self.group_window = GroupSettingsView(self.shared_folder, self.user, self.current_chat_id)
+            self.group_window.show()
 
     def eventFilter(self, obj, event):
         if obj is self.input_field and event.type() == QEvent.KeyPress:

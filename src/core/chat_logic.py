@@ -17,11 +17,14 @@ from src.storage.shared_store import (
     save_chat_keys, save_chat_meta, save_chat_meta_enc,
 )
 
+
 def _sorted_pair(fp1: str, fp2: str) -> tuple[str, str]:
     return tuple(sorted([fp1, fp2]))
 
+
 def _get_all_admin_fp16s(shared_folder: Path | str) -> list[str]:
     return [a["fp16"] for a in load_admins(shared_folder)]
+
 
 def _wrap_group_key_for_users(shared_folder: Path | str, group_key: bytes, participants_fp16: list[str]) -> dict[str, str]:
     wrapped = {}
@@ -37,7 +40,6 @@ def _wrap_group_key_for_users(shared_folder: Path | str, group_key: bytes, parti
 
 
 def create_dm_chat(shared_folder: Path | str, login1: str, login2: str) -> str:
-    """Создаёт или возвращает личный чат. Гибридное шифрование (без group_key)."""
     if login1 == login2:
         raise ValueError("Нельзя создать чат с самим собой")
 
@@ -60,7 +62,6 @@ def create_dm_chat(shared_folder: Path | str, login1: str, login2: str) -> str:
     })
     ensure_chat_folders(shared_folder, chat_id)
 
-    # Для DM ключи не нужны (они вшиты в каждое сообщение)
     meta_enc = {"participants": [fpa, fpb]}
     save_chat_meta_enc(shared_folder, chat_id, json.dumps(meta_enc).encode("utf-8"))
 
@@ -97,6 +98,7 @@ def create_group_chat(shared_folder: Path | str, creator_login: str, name: str, 
     meta_enc = {
         "name": name, "description": "", "members": fp16s,
         "admins": [creator_fp16], "created_by": creator_fp16,
+        "creator_fp16": creator_fp16,  # <--- ДОБАВЛЕНО
         "pinned_message": None, "public": False,
     }
 
@@ -155,12 +157,10 @@ def is_chat_visible(shared_folder: Path | str, chat_id: str, fp16: str) -> bool:
         return is_admin(shared_folder, fp16)
 
     if t == "dm":
-        # Для DM читаем открытый JSON участников
         enc = load_chat_meta_enc(shared_folder, chat_id)
         participants = json.loads(enc.decode("utf-8")).get("participants", [])
         return fp16 in participants
 
-    # Для групп и избранного проверяем обертки ключей
     try:
         keys = load_chat_keys(shared_folder, chat_id)
         return fp16 in keys.get("wrapped", {})
@@ -169,7 +169,6 @@ def is_chat_visible(shared_folder: Path | str, chat_id: str, fp16: str) -> bool:
 
 
 def list_user_chats(shared_folder: Path | str, fp16: str) -> list[dict]:
-    """Возвращает список чатов, видимых пользователю (для ЛИЧНОГО списка)."""
     meta_dir = Path(shared_folder) / ".meta"
     if not meta_dir.is_dir(): return []
 
@@ -178,20 +177,14 @@ def list_user_chats(shared_folder: Path | str, fp16: str) -> list[dict]:
         if entry.name.endswith(".keys.json"): continue
         chat_id = entry.stem
 
-        # ЖЕСТКАЯ ЗАЩИТА: Избранное (fav_) видит ТОЛЬКО владелец.
-        # Даже админ не должен видеть чужое Избранное в своем личном списке.
         if chat_id.startswith("fav_"):
             owner_fp = chat_id.replace("fav_", "")
             if owner_fp != fp16:
-                continue  # Пропускаем (не наше избранное)
-
-        # Для остальных чатов проверяем видимость (участник или админ)
-        if is_chat_visible(shared_folder, chat_id, fp16):
-            try:
-                result.append(load_chat_meta(shared_folder, chat_id))
-            except (FileNotFoundError, ValueError):
                 continue
 
+        if is_chat_visible(shared_folder, chat_id, fp16):
+            try: result.append(load_chat_meta(shared_folder, chat_id))
+            except (FileNotFoundError, ValueError): continue
     return sorted(result, key=lambda m: m.get("created_at", 0), reverse=True)
 
 
@@ -215,8 +208,9 @@ def get_chat_recipients(shared_folder: Path | str, chat_id: str) -> list[str]:
     for admin_fp in _get_all_admin_fp16s(shared_folder):
         if admin_fp not in recipients: recipients.append(admin_fp)
     return recipients
+
+
 def list_all_chats(shared_folder: Path | str) -> list[dict]:
-    """Возвращает ВСЕ чаты в шаре (только для админской панели)."""
     meta_dir = Path(shared_folder) / ".meta"
     if not meta_dir.is_dir(): return []
 
@@ -229,15 +223,8 @@ def list_all_chats(shared_folder: Path | str) -> list[dict]:
             continue
     return sorted(result, key=lambda m: m.get("created_at", 0), reverse=True)
 
+
 def get_all_users_fp16(shared_folder: Path | str) -> list[str]:
     keys_dir = Path(shared_folder) / ".keys"
     if not keys_dir.is_dir(): return []
-    # Берем имена файлов и отрезаем .pub.pem
     return [f.name.replace(".pub.pem", "") for f in keys_dir.glob("*.pub.pem")]
-
-def get_all_users_fp16(shared_folder: Path | str) -> list[str]:
-    """Возвращает fp16 всех пользователей (по наличию .pub.pem)."""
-    keys_dir = Path(shared_folder) / ".keys"
-    if not keys_dir.is_dir(): return []
-    return [f.name.replace(".pub.pem", "") for f in keys_dir.glob("*.pub.pem")]
-
