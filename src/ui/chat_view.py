@@ -2,11 +2,12 @@
 
 from pathlib import Path
 import json
+from datetime import datetime
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QDialog,
     QTextBrowser, QLineEdit, QPushButton, QLabel, QFileDialog
 )
-from PySide6.QtCore import Qt, QUrl, QEvent
+from PySide6.QtCore import Qt, QUrl, QEvent, QTimer
 from PySide6.QtGui import QDesktopServices, QKeySequence, QPixmap, QGuiApplication
 from loguru import logger
 import os
@@ -19,6 +20,7 @@ from src.core.chat_logic import get_chat_meta
 from src.core.crypto import unwrap_key, aes_decrypt, from_base64
 from src.storage.local_db import LocalDB
 from src.storage.shared_store import chat_files_dir, load_chat_keys, load_chat_meta_enc
+from src.core.status import get_status, set_typing, mark_messages_read, get_read_messages
 
 
 class ImageConfirmDialog(QDialog):
@@ -57,6 +59,14 @@ class ChatViewWidget(QWidget):
         self.current_other_fp = None
         self._setup_ui()
 
+        self.status_timer = QTimer(self)
+        self.status_timer.timeout.connect(self._update_status)
+        self.status_timer.start(2000)
+
+        self.typing_timer = QTimer(self)
+        self.typing_timer.setSingleShot(True)
+        self.typing_timer.timeout.connect(self._stop_typing)
+
     def _setup_ui(self):
         layout = QVBoxLayout(self)
 
@@ -71,10 +81,18 @@ class ChatViewWidget(QWidget):
         self.avatar_label.mousePressEvent = self._on_avatar_clicked
         header_layout.addWidget(self.avatar_label)
 
+        text_layout = QVBoxLayout()
+        text_layout.setSpacing(0)
+
         self.label_title = QLabel("Выберите чат")
         self.label_title.setStyleSheet("font-size: 16px; font-weight: bold;")
-        header_layout.addWidget(self.label_title)
+        text_layout.addWidget(self.label_title)
 
+        self.label_status = QLabel("")
+        self.label_status.setStyleSheet("font-size: 9pt; color: gray;")
+        text_layout.addWidget(self.label_status)
+
+        header_layout.addLayout(text_layout)
         header_layout.addStretch()
 
         layout.addWidget(self.header_widget)
@@ -117,11 +135,11 @@ class ChatViewWidget(QWidget):
         self.current_chat_id = chat_id
         self.text_browser.clear()
 
-        # Скрываем аватарку по умолчанию
         self.avatar_label.setVisible(False)
         self.avatar_label.clear()
         self.avatar_label.setStyleSheet("")
-        self.avatar_label.setCursor(Qt.ArrowCursor)  # Обычный курсор
+        self.avatar_label.setCursor(Qt.ArrowCursor)
+        self.label_status.setText("")
 
         self.input_widget.setVisible(True)
 
@@ -137,7 +155,6 @@ class ChatViewWidget(QWidget):
 
             self.current_other_fp = None
 
-            # --- ЛОГИКА ОТОБРАЖЕНИЯ АВАТАРКИ ---
             if chat_type == "dm":
                 parts = chat_id.replace("dm_", "").split("__")
                 if len(parts) == 2:
@@ -167,8 +184,7 @@ class ChatViewWidget(QWidget):
 
                         if "nonce" in data and "ciphertext" in data:
                             aad = f"chat_id={chat_id}|meta".encode("utf-8")
-                            decrypted = aes_decrypt(group_key, from_base64(data["nonce"]),
-                                                    from_base64(data["ciphertext"]), aad=aad)
+                            decrypted = aes_decrypt(group_key, from_base64(data["nonce"]), from_base64(data["ciphertext"]), aad=aad)
                             meta_group = json.loads(decrypted.decode("utf-8"))
                             group_name = meta_group.get("name", group_name)
                 except Exception as e:
@@ -191,6 +207,7 @@ class ChatViewWidget(QWidget):
                 title = chat_id
 
             self.label_title.setText(title)
+            self._update_status()
 
             messages = read_messages(
                 self.shared_folder, chat_id,
@@ -200,6 +217,17 @@ class ChatViewWidget(QWidget):
             if not messages:
                 self.text_browser.setHtml("<i>Нет сообщений. Напишите первым!</i>")
                 return
+
+            # --- ОТМЕЧАЕМ СООБЩЕНИЯ КАК ПРОЧИТАННЫЕ ---
+            if self.current_other_fp:
+                incoming_ids = [m.msg_id for m in messages if m.sender_fp16 != self.user.fp16]
+                if incoming_ids:
+                    mark_messages_read(self.shared_folder, chat_id, self.user.fp16, incoming_ids)
+
+            # Получаем список наших сообщений, прочитанных собеседником
+            read_by_other = []
+            if self.current_other_fp:
+                read_by_other = get_read_messages(self.shared_folder, chat_id, self.current_other_fp)
 
             theme = db.get_setting("theme", "base")
 
@@ -236,6 +264,18 @@ class ChatViewWidget(QWidget):
                     avatar_url = QUrl.fromLocalFile(str(sender_avatar_path)).toString()
                     avatar_html = f"<img src='{avatar_url}' width='20' height='20' style='border-radius: 10px;' />&nbsp;"
 
+                dt = datetime.fromtimestamp(msg.ts / 1000)
+                time_str = dt.strftime("%H:%M")
+                time_color = "#aaaaaa" if not is_me else "#dddddd"
+
+                # --- ГАЛОЧКИ ПРОЧТЕНИЯ ---
+                checkmark = ""
+                if is_me:
+                    if msg.msg_id in read_by_other:
+                        checkmark = " ✓✓"
+                    else:
+                        checkmark = " ✓"
+
                 display_text = msg.text
                 if msg.text.startswith("[FILE]") and msg.text.endswith("[/FILE]"):
                     inner = msg.text[6:-7]
@@ -269,6 +309,9 @@ class ChatViewWidget(QWidget):
                         <tr>
                             <td>{display_text}</td>
                         </tr>
+                        <tr>
+                            <td style="text-align: right; font-size: 8pt; color: {time_color}; padding-top: 0;">{time_str}{checkmark}</td>
+                        </tr>
                     </table>
                 </div>
                 """
@@ -281,6 +324,30 @@ class ChatViewWidget(QWidget):
         except Exception as e:
             logger.error(f"Ошибка загрузки чата {chat_id}: {e}")
             self.text_browser.setHtml(f"<b style='color: red;'>Ошибка загрузки сообщений</b><br>{e}")
+
+    def _update_status(self):
+        if not self.current_chat_id or not self.current_other_fp:
+            self.label_status.setText("")
+            return
+
+        status = get_status(self.shared_folder, self.current_other_fp)
+        typing = status.get("typing", False) and status.get("typing_chat") == self.current_chat_id
+        online = status.get("online", False)
+        last_seen = status.get("last_seen", 0)
+
+        if typing:
+            self.label_status.setText("печатает...")
+        elif online:
+            self.label_status.setText("в сети")
+        elif last_seen > 0:
+            dt = datetime.fromtimestamp(last_seen)
+            self.label_status.setText(f"был(а) в сети {dt.strftime('%H:%M')}")
+        else:
+            self.label_status.setText("не в сети")
+
+    def _stop_typing(self):
+        if self.current_chat_id:
+            set_typing(self.shared_folder, self.user.fp16, self.current_chat_id, False)
 
     def _on_avatar_clicked(self, event):
         if not self.current_chat_id:
@@ -298,6 +365,10 @@ class ChatViewWidget(QWidget):
 
     def eventFilter(self, obj, event):
         if obj is self.input_field and event.type() == QEvent.KeyPress:
+            if self.current_chat_id and self.current_other_fp:
+                set_typing(self.shared_folder, self.user.fp16, self.current_chat_id, True)
+                self.typing_timer.start(3000)
+
             if event.matches(QKeySequence.Paste):
                 clipboard = QGuiApplication.clipboard()
                 if clipboard.mimeData().hasImage():

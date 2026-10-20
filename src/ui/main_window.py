@@ -6,7 +6,8 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QFrame, QDialog, QListWidget,
     QListWidgetItem, QApplication, QMessageBox, QMenu
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSize, QRectF
+from PySide6.QtGui import QPixmap, QIcon, QPainter, QBrush
 
 from config import get_config
 from src.ui.chat_list import ChatListWidget
@@ -19,6 +20,7 @@ from src.core.admin import (
     remove_admin, toggle_manage_rights, toggle_read_rights, can_read_all_chats, can_manage_admins
 )
 from src.core.chat_logic import get_all_users_fp16
+from src.core.status import set_online
 from src.storage.local_db import LocalDB
 
 
@@ -31,6 +33,8 @@ class MainWindow(QMainWindow):
 
         self.account_manager = AccountManager()
         self.account_manager.add_account(user)
+
+        set_online(self.config.shared_folder, self.user.fp16, True)
 
         self.setWindowTitle(f"Pygram - {user.login} ({user.role})")
         self.resize(1000, 650)
@@ -73,6 +77,10 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         self._on_settings_saved()
 
+    def closeEvent(self, event):
+        set_online(self.config.shared_folder, self.user.fp16, False)
+        event.accept()
+
     def _setup_sidebar(self):
         if not hasattr(self, 'sidebar'):
             self.sidebar = QFrame()
@@ -112,11 +120,35 @@ class MainWindow(QMainWindow):
 
         self.sidebar_layout.addStretch()
 
-        self.btn_profile = QPushButton("👤")
+        # Кнопка профиля с аватаркой
+        self.btn_profile = QPushButton()
         self.btn_profile.setFixedSize(45, 45)
         self.btn_profile.setCursor(Qt.PointingHandCursor)
         self.btn_profile.setToolTip(f"Профиль: {self.user.login}")
         self.btn_profile.clicked.connect(self._open_profile)
+
+        profile_dir = Path(self.config.shared_folder) / ".profiles"
+        avatar_path = profile_dir / f"{self.user.fp16}.png"
+
+        if avatar_path.exists():
+            pixmap = QPixmap(str(avatar_path))
+            rounded = QPixmap(45, 45)
+            rounded.fill(Qt.transparent)
+
+            painter = QPainter(rounded)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setBrush(QBrush(pixmap.scaled(45, 45, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(QRectF(0, 0, 45, 45))
+            painter.end()
+
+            self.btn_profile.setIcon(QIcon(rounded))
+            self.btn_profile.setIconSize(QSize(45, 45))
+            self.btn_profile.setStyleSheet("border: none; background: transparent;")
+        else:
+            self.btn_profile.setText("👤")
+            self.btn_profile.setStyleSheet("font-size: 24px;")
+
         self.sidebar_layout.addWidget(self.btn_profile)
 
     def _open_profile(self):
@@ -272,8 +304,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Ошибка", str(e))
 
     def _reload_for_user(self, user):
+        set_online(self.config.shared_folder, self.user.fp16, False)
+
         self.user = user
         self.setWindowTitle(f"Pygram - {user.login} ({user.role})")
+
+        set_online(self.config.shared_folder, self.user.fp16, True)
 
         self._setup_sidebar()
 

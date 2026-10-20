@@ -4,7 +4,7 @@ from pathlib import Path
 import json
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QLineEdit, QFileDialog, QMessageBox, QListWidget
+    QLineEdit, QFileDialog, QMessageBox, QListWidget, QListWidgetItem
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
@@ -41,8 +41,7 @@ class GroupSettingsView(QWidget):
 
                 if "nonce" in data and "ciphertext" in data:
                     aad = f"chat_id={self.chat_id}|meta".encode("utf-8")
-                    decrypted = aes_decrypt(group_key, from_base64(data["nonce"]), from_base64(data["ciphertext"]),
-                                            aad=aad)
+                    decrypted = aes_decrypt(group_key, from_base64(data["nonce"]), from_base64(data["ciphertext"]), aad=aad)
                     self.meta = json.loads(decrypted.decode("utf-8"))
 
                     creator = self.meta.get("creator_fp16", "")
@@ -92,7 +91,7 @@ class GroupSettingsView(QWidget):
             rename_layout.addWidget(btn_rename)
             layout.addLayout(rename_layout)
 
-        layout.addWidget(QLabel("<b>Участники:</b>"))
+        layout.addWidget(QLabel("<b>Участники (нажмите для просмотра профиля):</b>"))
 
         self.list_widget = QListWidget()
         db = LocalDB()
@@ -104,9 +103,20 @@ class GroupSettingsView(QWidget):
             role = " (Админ)" if m in admins else ""
             if m == self.user.fp16:
                 role += " (Вы)"
-            self.list_widget.addItem(f"{login}{role}")
 
+            item = QListWidgetItem(f"{login}{role}")
+            item.setData(Qt.UserRole, m)
+            self.list_widget.addItem(item)
+
+        self.list_widget.itemClicked.connect(self._on_member_clicked)
         layout.addWidget(self.list_widget)
+
+    def _on_member_clicked(self, item):
+        fp16 = item.data(Qt.UserRole)
+        if fp16:
+            from src.ui.profile_view import ProfileView
+            self.profile_window = ProfileView(self.shared_folder, self.user, target_fp16=fp16)
+            self.profile_window.show()
 
     def _on_change_avatar(self, event):
         if not self.is_creator:
