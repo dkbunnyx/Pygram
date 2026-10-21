@@ -12,7 +12,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap, QIcon
 from loguru import logger
 
-from src.storage.local_db import LocalDB
+from src.storage.local_db import get_db
 
 
 class ProfileView(QWidget):
@@ -299,7 +299,7 @@ class ProfileView(QWidget):
             except Exception:
                 pass
 
-        db = LocalDB()
+        db = get_db()
         if self.is_own:
             self.input_bio.setText(bio_text)
             self.label_name.setText(self.user.login)

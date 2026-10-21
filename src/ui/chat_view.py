@@ -21,7 +21,7 @@ from src.core.message import (
 from src.core.chat_logic import get_chat_meta
 from src.core.crypto import unwrap_key, aes_decrypt, from_base64
 from src.core.admin import can_read_all_chats
-from src.storage.local_db import LocalDB
+from src.storage.local_db import get_db
 from src.storage.shared_store import (
     chat_files_dir, chat_message_dir, load_chat_keys, load_chat_meta_enc,
 )
@@ -113,7 +113,7 @@ class SendWorker(QThread):
                 self.shared_folder, self.chat_id,
                 self.user_fp16, self.user_priv_pem, self.text,
             )
-            db = LocalDB()
+            db = get_db()
             db.delete_message(self.temp_id)
             db.save_message(real_id, self.chat_id, self.user_fp16, self.text, int(time.time() * 1000))
 
@@ -265,7 +265,7 @@ class ChatViewWidget(QWidget):
         input_layout = QHBoxLayout(self.input_widget)
         input_layout.setContentsMargins(0, 0, 0, 0)
 
-        db = LocalDB()
+        db = get_db()
         emoji_btn = db.get_setting("emoji_button", "😊")
         self.btn_emoji = QPushButton(emoji_btn)
         self.btn_emoji.setFixedSize(40, 40)
@@ -293,7 +293,7 @@ class ChatViewWidget(QWidget):
         self.input_widget.setVisible(False)
 
     def _apply_chat_background(self):
-        db = LocalDB()
+        db = get_db()
         bg_image_path = db.get_setting("chat_bg_image", "")
         if bg_image_path and os.path.exists(bg_image_path):
             self.messages_list.set_background_image(bg_image_path)
@@ -338,7 +338,7 @@ class ChatViewWidget(QWidget):
 
         self.input_widget.setVisible(True)
 
-        db = LocalDB()
+        db = get_db()
         profile_dir = Path(self.shared_folder) / ".profiles"
         font_size = int(db.get_setting("font_size", "14"))
 
@@ -397,7 +397,7 @@ class ChatViewWidget(QWidget):
         if not self.current_chat_id:
             return
 
-        db = LocalDB()
+        db = get_db()
         cached_msgs = db.get_messages(self.current_chat_id)
 
         new_msgs = [
@@ -466,7 +466,7 @@ class ChatViewWidget(QWidget):
         temp_ts = int(time.time() * 1000)
         temp_msg_id = f"pending_{temp_ts}_{self.user.fp16}"
 
-        db = LocalDB()
+        db = get_db()
         db.save_message(temp_msg_id, self.current_chat_id, self.user.fp16, text, temp_ts)
         self._render_from_db()
 
@@ -500,7 +500,7 @@ class ChatViewWidget(QWidget):
         worker.start()
 
     def _create_message_widget(self, msg, read_by_other, profile_dir, font_size):
-        db = LocalDB()
+        db = get_db()
         is_me = (msg.sender_fp16 == self.user.fp16)
         sender_name = "Вы" if is_me else db.get_login_by_fp16(msg.sender_fp16)
 
@@ -607,7 +607,7 @@ class ChatViewWidget(QWidget):
             item = self.messages_list.item(i)
             w = self.messages_list.itemWidget(item)
             if isinstance(w, MessageWidget) and w.msg_id == msg_id:
-                db = LocalDB()
+                db = get_db()
                 font_size = int(db.get_setting("font_size", "14"))
                 w.set_selected(msg_id in self.selected_msg_ids, font_size)
                 break
@@ -633,7 +633,7 @@ class ChatViewWidget(QWidget):
         for_everyone = (msg_box.clickedButton() == btn_all)
 
         # 1. Мгновенно удаляем из локальной БД (чтобы сразу исчезло с экрана)
-        db = LocalDB()
+        db = get_db()
         msgs_to_delete = list(self.selected_msg_ids)
         for msg_id in msgs_to_delete:
             db.delete_message(msg_id)
@@ -655,7 +655,7 @@ class ChatViewWidget(QWidget):
             return
 
         menu = QMenu(self)
-        db = LocalDB()
+        db = get_db()
         quick_emoji = db.get_setting("quick_reaction", "❤️")
         reactions = get_reactions(self.shared_folder, self.current_chat_id, msg_id)
         my_reaction = reactions.get(self.user.fp16)
@@ -702,7 +702,7 @@ class ChatViewWidget(QWidget):
     def _on_message_double_clicked(self, msg_id: str):
         if self.selection_mode or msg_id.startswith("pending_"):
             return
-        db = LocalDB()
+        db = get_db()
         quick_emoji = db.get_setting("quick_reaction", "❤️")
         reactions = get_reactions(self.shared_folder, self.current_chat_id, msg_id)
         if reactions.get(self.user.fp16) == quick_emoji:

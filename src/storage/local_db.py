@@ -12,6 +12,31 @@ from src.os_integration.win import get_local_dir
 
 DB_VERSION = 2
 
+# ============================================================================
+# Синглтон
+# ============================================================================
+
+_db_instance: "LocalDB | None" = None
+_db_lock = threading.Lock()
+
+
+def get_db() -> "LocalDB":
+    """Возвращает единственный экземпляр LocalDB (синглтон).
+
+    Потокобезопасно: первый вызов создаёт экземпляр, все последующие
+    возвращают тот же объект. LocalDB внутри использует threading.local,
+    поэтому соединение с SQLite открывается отдельно для каждого потока.
+
+    Returns:
+        Глобальный экземпляр LocalDB.
+    """
+    global _db_instance
+    if _db_instance is None:
+        with _db_lock:
+            if _db_instance is None:
+                _db_instance = LocalDB()
+    return _db_instance
+
 
 class LocalDB:
     def __init__(self, db_path: Path | None = None):

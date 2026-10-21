@@ -22,7 +22,7 @@ from src.core.admin import (
 )
 from src.core.chat_logic import get_all_users_fp16
 from src.core.status import set_online
-from src.storage.local_db import LocalDB
+from src.storage.local_db import get_db
 
 
 class MainWindow(QMainWindow):
@@ -35,7 +35,7 @@ class MainWindow(QMainWindow):
         self.account_manager = AccountManager()
         self.account_manager.add_account(user)
 
-        db = LocalDB()
+        db = get_db()
         hide_last_seen = db.get_setting("hide_last_seen", "0") == "1"
         set_online(
             self.config.shared_folder, self.user.fp16, True,
@@ -94,7 +94,7 @@ class MainWindow(QMainWindow):
         self.chat_list.refresh_chats()
 
     def closeEvent(self, event):
-        db = LocalDB()
+        db = get_db()
         hide_last_seen = db.get_setting("hide_last_seen", "0") == "1"
         set_online(
             self.config.shared_folder, self.user.fp16, False,
@@ -223,7 +223,7 @@ class MainWindow(QMainWindow):
         def refresh_admins():
             admins_list.clear()
             users = get_all_users_fp16(self.config.shared_folder)
-            db = LocalDB()
+            db = get_db()
             for fp in users:
                 login = db.get_login_by_fp16(fp)
                 is_adm = is_admin(self.config.shared_folder, fp)
@@ -291,7 +291,7 @@ class MainWindow(QMainWindow):
 
         def refresh_users():
             users_list.clear()
-            db = LocalDB()
+            db = get_db()
             for fp in get_all_users_fp16(self.config.shared_folder):
                 login = db.get_login_by_fp16(fp)
                 item = QListWidgetItem(f"👤 {login}  [{fp[:8]}]")
@@ -303,7 +303,7 @@ class MainWindow(QMainWindow):
             if not item:
                 return
             fp = item.data(Qt.UserRole)
-            db = LocalDB()
+            db = get_db()
             login = db.get_login_by_fp16(fp)
             menu = QMenu(dialog)
 
@@ -510,7 +510,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Ошибка", str(e))
 
     def _reload_for_user(self, user):
-        db = LocalDB()
+        db = get_db()
         hide_last_seen = db.get_setting("hide_last_seen", "0") == "1"
         set_online(
             self.config.shared_folder, self.user.fp16, False,
@@ -541,7 +541,7 @@ class MainWindow(QMainWindow):
         self.chat_list.current_open_chat_id = None
 
     def _on_settings_saved(self):
-        db = LocalDB()
+        db = get_db()
         font_family = db.get_setting("font_family", "Segoe UI")
         font_size = int(db.get_setting("font_size", "14"))
 

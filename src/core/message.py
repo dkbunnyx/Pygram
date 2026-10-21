@@ -57,6 +57,7 @@ from src.storage.shared_store import (
     load_pub_key_by_fp16,
     write_bytes_atomic,
 )
+from src.storage.local_db import get_db
 
 
 # Максимальная ширина картинки при отправке (px). Высота — пропорционально.
@@ -481,9 +482,7 @@ def sync_messages_to_db(shared_folder: Path | str, chat_id: str, my_fp16: str, m
     Читает только те файлы, которых еще нет в БД (инкрементально).
     Используется фоновым потоком ChatLoadWorker в UI.
     """
-    from src.storage.local_db import LocalDB
-
-    db = LocalDB()
+    db = get_db()
 
     # 1. Получаем ID сообщений, которые уже есть в локальной БД
     existing_msgs = db.get_messages(chat_id)
@@ -493,26 +492,5 @@ def sync_messages_to_db(shared_folder: Path | str, chat_id: str, my_fp16: str, m
     new_msgs = read_new_messages(shared_folder, chat_id, my_fp16, my_priv_pem, known_ids)
 
     # 3. Сохраняем в БД
-    for msg in new_msgs:
-        db.save_message(msg.msg_id, chat_id, msg.sender_fp16, msg.text, msg.ts)
-
-
-# ============================================================================
-# СИНХРОНИЗАЦИЯ С ЛОКАЛЬНОЙ БД
-# ============================================================================
-
-def sync_messages_to_db(shared_folder: Path | str, chat_id: str, my_fp16: str, my_priv_pem: str):
-    """Синхронизирует новые сообщения из шары в локальную SQLite."""
-    from src.storage.local_db import LocalDB
-    db = LocalDB()
-
-    # Получаем ID сообщений, которые уже есть в локальной БД
-    existing_msgs = db.get_messages(chat_id)
-    known_ids = {m["msg_id"] for m in existing_msgs}
-
-    # Читаем только новые
-    new_msgs = read_new_messages(shared_folder, chat_id, my_fp16, my_priv_pem, known_ids)
-
-    # Сохраняем в БД
     for msg in new_msgs:
         db.save_message(msg.msg_id, chat_id, msg.sender_fp16, msg.text, msg.ts)

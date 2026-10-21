@@ -10,7 +10,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 from loguru import logger
 
-from src.storage.local_db import LocalDB
+from src.storage.local_db import get_db
 from src.core.crypto import unwrap_key, aes_encrypt, to_base64, from_base64, aes_decrypt
 from src.storage.shared_store import load_chat_keys, load_chat_meta_enc, save_chat_meta_enc
 from src.core.chat_logic import (
@@ -97,7 +97,7 @@ class GroupSettingsView(QWidget):
         layout.addWidget(QLabel("<b>Участники (ПКМ — действия):</b>"))
 
         self.list_widget = QListWidget()
-        db = LocalDB()
+        db = get_db()
         members = self.meta.get("members", [])
         admins = self.meta.get("admins", [])
 
