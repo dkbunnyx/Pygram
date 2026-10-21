@@ -14,6 +14,7 @@ from config import get_config
 from src.core.admin import has_any_admin, is_admin, make_admin
 from src.core.identity import authenticate, register_identity
 from src.os_integration.win import get_local_dir
+from src.storage.local_db import get_db
 from src.storage.shared_store import load_login_marker, load_pub_key
 
 
@@ -68,9 +69,7 @@ def login_user(shared_folder: Path | str, login: str, password: str) -> User:
     _save_session(user)
 
     # Сохраняем в локальную БД для отображения имен
-    from src.storage.local_db import LocalDB
-    db = LocalDB()
-    db.save_user_map(user.fp16, user.login)
+    get_db().save_user_map(user.fp16, user.login)
 
     logger.info(f"Пользователь вошёл: {login} (fp16={fp16})")
     return user

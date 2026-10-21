@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 
-from src.storage.local_db import LocalDB
+from src.storage.local_db import get_db
 import os
 
 
@@ -231,7 +231,7 @@ class SettingsView(QWidget):
         self.colors_widget.setVisible("Пользовательская" in text)
 
     def _load_settings(self):
-        db = LocalDB()
+        db = get_db()
 
         # Шрифты
         self.combo_font.setCurrentText(db.get_setting("font_family", "Segoe UI"))
@@ -283,7 +283,7 @@ class SettingsView(QWidget):
         button.setStyleSheet(f"background-color: {color_hex}; color: {text_color}; padding: 5px; border-radius: 4px;")
 
     def _pick_color(self, setting_key: str, button):
-        db = LocalDB()
+        db = get_db()
         current = db.get_setting(setting_key, "#000000")
         color = QColorDialog.getColor(QColor(current), self, "Выберите цвет")
         if color.isValid():
@@ -294,12 +294,12 @@ class SettingsView(QWidget):
     def _on_pick_bg_image(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Выберите фоновое изображение", "", "Images (*.png *.jpg *.jpeg *.bmp)")
         if file_path:
-            db = LocalDB()
+            db = get_db()
             db.set_setting("chat_bg_image", file_path)
             self.btn_bg_image.setText("✅ Фон установлен (нажмите, чтобы изменить)")
 
     def _on_clear_bg_image(self):
-        db = LocalDB()
+        db = get_db()
         db.set_setting("chat_bg_image", "")
         self.btn_bg_image.setText("Установить картинку на фон")
         QMessageBox.information(self, "Успех", "Фон окна сообщений убран")
@@ -327,7 +327,7 @@ class SettingsView(QWidget):
         self.btn_quick_reaction.setText(emoji)
 
     def _on_save(self):
-        db = LocalDB()
+        db = get_db()
         db.set_setting("font_family", self.combo_font.currentText())
         db.set_setting("font_size", str(self.spin_size.value()))
         db.set_setting("btn_text", self.input_btn_text.text() or "Отправить")

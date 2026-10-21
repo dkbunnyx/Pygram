@@ -11,7 +11,7 @@ from PySide6.QtGui import QColor, QIcon, QPixmap
 from loguru import logger
 
 from src.core.chat_logic import list_user_chats, create_dm_chat, list_all_chats, create_group_chat
-from src.storage.local_db import LocalDB
+from src.storage.local_db import get_db
 from src.core.crypto import unwrap_key, aes_decrypt, from_base64
 from src.storage.shared_store import load_chat_keys, load_chat_meta_enc
 from src.core.status import get_unread_count
@@ -127,7 +127,7 @@ class ChatListWidget(QWidget):
     def _add_chat_item(self, chat: dict, prefix: str = "", show_unread: bool = True):
         chat_id = chat["chat_id"]
         chat_type = chat["type"]
-        db = LocalDB()
+        db = get_db()
 
         icon = None
         display_name = chat_id
@@ -185,7 +185,7 @@ class ChatListWidget(QWidget):
 
     def _check_new_messages(self, chats: list[dict]):
         """Проверяет новые сообщения и показывает уведомления."""
-        db = LocalDB()
+        db = get_db()
         for chat in chats:
             chat_id = chat["chat_id"]
             unread = get_unread_count(self.shared_folder, chat_id, self.user_fp16)
@@ -237,7 +237,7 @@ class ChatListWidget(QWidget):
                 from src.core.identity import get_fp16
                 other_fp = get_fp16(self.shared_folder, login)
                 if other_fp:
-                    db = LocalDB()
+                    db = get_db()
                     db.save_user_map(other_fp, login)
 
                 self.refresh_chats()
