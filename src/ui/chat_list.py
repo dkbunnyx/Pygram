@@ -14,7 +14,6 @@ from src.core.chat_logic import list_user_chats, create_dm_chat, list_all_chats,
 from src.storage.local_db import LocalDB
 from src.core.crypto import unwrap_key, aes_decrypt, from_base64
 from src.storage.shared_store import load_chat_keys, load_chat_meta_enc
-from src.core.status import get_unread_count
 from src.os_integration.notifications import show_notification
 
 
@@ -32,8 +31,8 @@ class ChatListWidget(QWidget):
         self.user_is_admin = user_is_admin
         self.profile_dir = Path(shared_folder) / ".profiles"
         self._last_unread = {}
+        self.db = LocalDB()
 
-        # ID чата, который сейчас открыт в ChatViewWidget.
         self.current_open_chat_id: str | None = None
 
         self._setup_ui()
@@ -97,7 +96,6 @@ class ChatListWidget(QWidget):
                     self._add_chat_item(chat, show_unread=True)
                 self._check_new_messages(chats)
 
-                # --- АВТОВЫБОР ПЕРВОГО ЧАТА ---
                 if not self.current_open_chat_id:
                     first_chat_id = chats[0]["chat_id"]
                     self.current_open_chat_id = first_chat_id
@@ -127,7 +125,6 @@ class ChatListWidget(QWidget):
     def _add_chat_item(self, chat: dict, prefix: str = "", show_unread: bool = True):
         chat_id = chat["chat_id"]
         chat_type = chat["type"]
-        db = LocalDB()
 
         icon = None
         display_name = chat_id
@@ -138,7 +135,7 @@ class ChatListWidget(QWidget):
                 fp1, fp2 = parts
                 other_fp = fp1 if fp2 == self.user_fp16 else fp2
 
-                display_name = db.get_login_by_fp16(other_fp)
+                display_name = self.db.get_login_by_fp16(other_fp)
                 if display_name == other_fp[:8]:
                     display_name = f"Чат {other_fp[:8]}"
 
@@ -159,8 +156,8 @@ class ChatListWidget(QWidget):
 
         elif chat_type == "favorites":
             owner_fp = chat_id.replace("fav_", "")
-            owner_login = db.get_login_by_fp16(owner_fp)
-            if prefix:  # Значит это чужой чат (в админ-списке)
+            owner_login = self.db.get_login_by_fp16(owner_fp)
+            if prefix:
                 display_name = f"⭐ Избранное {owner_login}"
             else:
                 display_name = "⭐ Избранное"
@@ -168,9 +165,8 @@ class ChatListWidget(QWidget):
         elif chat_type == "admin_chat":
             display_name = "🛡 Админ-чат"
 
-        # Счетчик непрочитанных: только если show_unread=True И чат не открыт сейчас
         if show_unread and chat_id != self.current_open_chat_id:
-            unread = get_unread_count(self.shared_folder, chat_id, self.user_fp16)
+            unread = self.db.get_unread_count(chat_id, self.user_fp16)
             if unread > 0:
                 display_name = f"{display_name} ({unread})"
 
@@ -184,15 +180,12 @@ class ChatListWidget(QWidget):
         self.list_widget.addItem(item)
 
     def _check_new_messages(self, chats: list[dict]):
-        """Проверяет новые сообщения и показывает уведомления."""
-        db = LocalDB()
         for chat in chats:
             chat_id = chat["chat_id"]
-            unread = get_unread_count(self.shared_folder, chat_id, self.user_fp16)
+            unread = self.db.get_unread_count(chat_id, self.user_fp16)
 
             old_count = self._last_unread.get(chat_id, 0)
             if unread > old_count:
-                # Не показываем уведомление, если этот чат сейчас открыт
                 if chat_id == self.current_open_chat_id:
                     self._last_unread[chat_id] = unread
                     continue
@@ -203,7 +196,7 @@ class ChatListWidget(QWidget):
                     if len(parts) == 2:
                         fp1, fp2 = parts
                         other_fp = fp1 if fp2 == self.user_fp16 else fp2
-                        title = db.get_login_by_fp16(other_fp)
+                        title = self.db.get_login_by_fp16(other_fp)
                     else:
                         title = "Личный чат"
                 elif chat_type == "group":
@@ -237,8 +230,7 @@ class ChatListWidget(QWidget):
                 from src.core.identity import get_fp16
                 other_fp = get_fp16(self.shared_folder, login)
                 if other_fp:
-                    db = LocalDB()
-                    db.save_user_map(other_fp, login)
+                    self.db.save_user_map(other_fp, login)
 
                 self.refresh_chats()
 
@@ -281,11 +273,7 @@ class ChatListWidget(QWidget):
                 member_logins
             )
 
-            # --- СОХРАНЯЕМ ИМЯ В КЭШ СРАЗУ ---
-            from src.storage.local_db import LocalDB
-            db = LocalDB()
-            db.save_chat_cache(chat_id, "group", name)
-            # ---------------------------------
+            self.db.save_chat_cache(chat_id, "group", name)
 
             self.refresh_chats()
 

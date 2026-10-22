@@ -59,8 +59,8 @@ def load_admins(shared_folder: Path | str) -> list[dict]:
 def load_admins_verified(shared_folder: Path | str) -> list[dict]:
     """Загружает админов и проверяет подписи (кроме system).
 
-    Записи с невалидной подписью отбрасываются. Это защищает от
-    подмены .admins/list.json злоумышленником с доступом к шаре.
+    Записи с невалидной подписью или отсутствующим ключом подписанта
+    ОТБРАСЫВАЮТСЯ. Это защищает от подмены .admins/list.json злоумышленником.
     """
     raw = _load_list(shared_folder)["admins"]
     verified: list[dict] = []
@@ -75,7 +75,7 @@ def load_admins_verified(shared_folder: Path | str) -> list[dict]:
                 f"Админ {entry.get('fp16', '?')}: подписант "
                 f"{entry.get('added_by', '?')} не найден, пропущен"
             )
-            continue
+            continue  # ← ОТБРАСЫВАЕМ
         if verify_signature(entry, by_pub):
             verified.append(entry)
         else:
@@ -83,7 +83,6 @@ def load_admins_verified(shared_folder: Path | str) -> list[dict]:
                 f"Админ {entry.get('fp16', '?')}: подпись невалидна, пропущен"
             )
     return verified
-
 
 def has_any_admin(shared_folder: Path | str) -> bool:
     return len(load_admins_verified(shared_folder)) > 0

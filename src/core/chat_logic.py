@@ -8,7 +8,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from src.core.admin import is_admin, load_admins, can_read_all_chats
+from src.core.admin import is_admin, load_admins_verified, can_read_all_chats
 from src.core.crypto import aes_encrypt, generate_aes_key, generate_uuid, rsa_encrypt, to_base64
 from src.core.identity import get_fp16
 from src.storage.shared_store import (
@@ -25,11 +25,11 @@ def _sorted_pair(fp1: str, fp2: str) -> tuple[str, str]:
 def _get_reading_admin_fp16s(shared_folder: Path | str) -> list[str]:
     """Возвращает fp16 админов, у которых есть право читать все чаты.
 
-    Это либо супер-админ, либо админ с флагом can_read_all_chats.
-    Обычные админы без права сюда НЕ попадают.
+    Использует load_admins_verified() — подписи проверяются.
+    Злоумышленник не сможет подделать запись в .admins/list.json.
     """
     return [
-        a["fp16"] for a in load_admins(shared_folder)
+        a["fp16"] for a in load_admins_verified(shared_folder)
         if a.get("is_super") or a.get("can_read_all_chats")
     ]
 
@@ -133,7 +133,6 @@ def create_favorites(shared_folder: Path | str, login: str) -> str:
     ensure_chat_folders(shared_folder, chat_id)
 
     group_key = generate_aes_key()
-    # Владелец + админы с правом чтения
     recipients = [fp16] + _get_reading_admin_fp16s(shared_folder)
     wrapped = _wrap_group_key_for_users(shared_folder, group_key, recipients)
     save_chat_keys(shared_folder, chat_id, {"version": 1, "wrapped": wrapped})
@@ -175,7 +174,10 @@ def is_chat_visible(shared_folder: Path | str, chat_id: str, fp16: str) -> bool:
     if t == "dm":
         enc = load_chat_meta_enc(shared_folder, chat_id)
         participants = json.loads(enc.decode("utf-8")).get("participants", [])
-        return fp16 in participants
+        if fp16 in participants:
+            return True
+        # Админ с правом чтения видит DM (как и в _prepare_chat_keys)
+        return can_read_all_chats(shared_folder, fp16)
 
     try:
         keys = load_chat_keys(shared_folder, chat_id)
@@ -225,7 +227,6 @@ def get_chat_recipients(shared_folder: Path | str, chat_id: str) -> list[str]:
     except FileNotFoundError:
         recipients = []
 
-    # Дополняем списком админов с правами (на случай старых чатов)
     for admin_fp in _get_reading_admin_fp16s(shared_folder):
         if admin_fp not in recipients:
             recipients.append(admin_fp)
@@ -260,7 +261,6 @@ def get_all_users_fp16(shared_folder: Path | str) -> list[str]:
 # ============================================================================
 
 def _load_group_meta(shared_folder: Path | str, chat_id: str, by_fp16: str, by_priv_pem: str) -> tuple[dict, bytes, dict]:
-    """Загружает метаданные группы (расшифровывает)."""
     from src.core.crypto import unwrap_key, aes_decrypt, from_base64
     from src.storage.shared_store import load_chat_keys, load_chat_meta_enc
 
@@ -280,7 +280,6 @@ def _load_group_meta(shared_folder: Path | str, chat_id: str, by_fp16: str, by_p
 
 
 def _save_group_meta(shared_folder: Path | str, chat_id: str, meta: dict, group_key: bytes):
-    """Сохраняет метаданные группы (шифрует)."""
     from src.core.crypto import aes_encrypt, to_base64
     from src.storage.shared_store import save_chat_meta_enc
 
@@ -290,7 +289,6 @@ def _save_group_meta(shared_folder: Path | str, chat_id: str, meta: dict, group_
 
 
 def remove_group_member(shared_folder: Path | str, chat_id: str, target_fp16: str, by_fp16: str, by_priv_pem: str) -> None:
-    """Удаляет участника из группы."""
     from src.storage.shared_store import save_chat_keys
 
     meta, group_key, keys = _load_group_meta(shared_folder, chat_id, by_fp16, by_priv_pem)
@@ -322,7 +320,6 @@ def remove_group_member(shared_folder: Path | str, chat_id: str, target_fp16: st
 
 
 def toggle_group_admin(shared_folder: Path | str, chat_id: str, target_fp16: str, by_fp16: str, by_priv_pem: str) -> None:
-    """Назначает/снимает админа группы (только создатель)."""
     meta, group_key, keys = _load_group_meta(shared_folder, chat_id, by_fp16, by_priv_pem)
 
     if meta.get("creator_fp16") != by_fp16:
@@ -342,7 +339,6 @@ def toggle_group_admin(shared_folder: Path | str, chat_id: str, target_fp16: str
 
 
 def toggle_group_permission(shared_folder: Path | str, chat_id: str, target_fp16: str, perm: str, by_fp16: str, by_priv_pem: str) -> None:
-    """Меняет права участника (только создатель)."""
     meta, group_key, keys = _load_group_meta(shared_folder, chat_id, by_fp16, by_priv_pem)
 
     if meta.get("creator_fp16") != by_fp16:
@@ -363,7 +359,6 @@ def toggle_group_permission(shared_folder: Path | str, chat_id: str, target_fp16
 
 
 def can_edit_group_profile(shared_folder: Path | str, chat_id: str, fp16: str, priv_pem: str) -> bool:
-    """Может ли пользователь менять профиль группы?"""
     try:
         meta, _, _ = _load_group_meta(shared_folder, chat_id, fp16, priv_pem)
         if meta.get("creator_fp16") == fp16:
@@ -386,7 +381,6 @@ def delete_group_chat(shared_folder: Path | str, chat_id: str, by_fp16: str, by_
 
     root = Path(shared_folder)
 
-    # Удаляем сообщения и файлы
     msg_dir = chat_message_dir(root, chat_id)
     if msg_dir.exists():
         shutil.rmtree(msg_dir)
@@ -395,12 +389,10 @@ def delete_group_chat(shared_folder: Path | str, chat_id: str, by_fp16: str, by_
     if files_dir.exists():
         shutil.rmtree(files_dir)
 
-    # Удаляем метаданные и ключи
     for p in [chat_meta_path(root, chat_id), chat_meta_enc_path(root, chat_id), chat_keys_path(root, chat_id)]:
         if p.exists():
             p.unlink()
 
-    # Удаляем аватарку
     avatar = root / ".profiles" / f"{chat_id}.png"
     if avatar.exists():
         avatar.unlink()

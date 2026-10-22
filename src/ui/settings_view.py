@@ -1,5 +1,6 @@
 """Окно настроек Pygram (+ вкладка Конфиденциальность)."""
 
+from pathlib import Path
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QTabWidget, QPushButton, QComboBox, QLineEdit, QSpinBox,
@@ -97,14 +98,12 @@ class SettingsView(QWidget):
         self.tab_custom = QWidget()
         c_main_layout = QVBoxLayout(self.tab_custom)
 
-        # --- Тема ---
         self._add_separator(c_main_layout, "Тема оформления")
         self.combo_theme = QComboBox()
         self.combo_theme.addItems(["Основная (темная)", "Пользовательская"])
         self.combo_theme.currentTextChanged.connect(self._on_theme_changed)
         c_main_layout.addWidget(self.combo_theme)
 
-        # --- Фон чата ---
         self._add_separator(c_main_layout, "Фон окна сообщений")
         bg_image_layout = QHBoxLayout()
         self.btn_bg_image = QPushButton("Установить картинку на фон")
@@ -116,7 +115,6 @@ class SettingsView(QWidget):
         bg_image_layout.addWidget(self.btn_clear_bg_image)
         c_main_layout.addLayout(bg_image_layout)
 
-        # --- Цвета интерфейса (Пользовательские) ---
         self._add_separator(c_main_layout, "Цвета интерфейса")
 
         self.colors_widget = QWidget()
@@ -183,6 +181,23 @@ class SettingsView(QWidget):
         priv_layout.addWidget(self.chk_hide_last_seen)
 
         priv_layout.addSpacing(15)
+
+        # --- НОВЫЙ БЛОК: Папка для скачивания ---
+        self._add_separator(priv_layout, "Папка для сохранения файлов")
+
+        download_layout = QHBoxLayout()
+        self.input_download_dir = QLineEdit()
+        self.input_download_dir.setPlaceholderText("Путь к папке...")
+        self.input_download_dir.setReadOnly(True)
+        download_layout.addWidget(self.input_download_dir)
+
+        btn_pick_dir = QPushButton("Выбрать...")
+        btn_pick_dir.clicked.connect(self._on_pick_download_dir)
+        download_layout.addWidget(btn_pick_dir)
+        priv_layout.addLayout(download_layout)
+        # ----------------------------------------
+
+        priv_layout.addSpacing(15)
         info = QLabel(
             "<i>Примечание: сокрытие last_seen не влияет на статус «в сети» — "
             "когда вы онлайн, собеседник это видит. Скрывается только время "
@@ -227,6 +242,11 @@ class SettingsView(QWidget):
     # Обработчики
     # ========================================================================
 
+    def _on_pick_download_dir(self):
+        dir_path = QFileDialog.getExistingDirectory(self, "Выберите папку для сохранения файлов")
+        if dir_path:
+            self.input_download_dir.setText(dir_path)
+
     def _on_theme_changed(self, text):
         self.colors_widget.setVisible("Пользовательская" in text)
 
@@ -268,6 +288,10 @@ class SettingsView(QWidget):
 
         # Конфиденциальность
         self.chk_hide_last_seen.setChecked(db.get_setting("hide_last_seen", "0") == "1")
+
+        # Папка для скачивания (по умолчанию - Загрузки)
+        default_download = str(Path.home() / "Downloads")
+        self.input_download_dir.setText(db.get_setting("download_dir", default_download))
 
         # Аккаунты
         self.accounts_list.clear()
@@ -339,6 +363,7 @@ class SettingsView(QWidget):
         db.set_setting("theme", theme_str)
 
         db.set_setting("hide_last_seen", "1" if self.chk_hide_last_seen.isChecked() else "0")
+        db.set_setting("download_dir", self.input_download_dir.text())
 
         self.settings_changed.emit()
         self.close()
