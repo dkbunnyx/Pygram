@@ -280,6 +280,13 @@ class ChatListWidget(QWidget):
                 name,
                 member_logins
             )
+
+            # --- СОХРАНЯЕМ ИМЯ В КЭШ СРАЗУ ---
+            from src.storage.local_db import LocalDB
+            db = LocalDB()
+            db.save_chat_cache(chat_id, "group", name)
+            # ---------------------------------
+
             self.refresh_chats()
 
             for i in range(self.list_widget.count()):

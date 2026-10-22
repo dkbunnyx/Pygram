@@ -372,3 +372,37 @@ def can_edit_group_profile(shared_folder: Path | str, chat_id: str, fp16: str, p
         return perms.get("can_edit_profile", False)
     except Exception:
         return False
+
+
+def delete_group_chat(shared_folder: Path | str, chat_id: str, by_fp16: str, by_priv_pem: str) -> None:
+    """Полностью удаляет группу и все её файлы (только создатель)."""
+    import shutil
+    from src.storage.shared_store import chat_message_dir, chat_files_dir, chat_meta_path, chat_meta_enc_path, \
+        chat_keys_path
+
+    meta, _, _ = _load_group_meta(shared_folder, chat_id, by_fp16, by_priv_pem)
+    if meta.get("creator_fp16") != by_fp16:
+        raise ValueError("Только создатель может удалить группу")
+
+    root = Path(shared_folder)
+
+    # Удаляем сообщения и файлы
+    msg_dir = chat_message_dir(root, chat_id)
+    if msg_dir.exists():
+        shutil.rmtree(msg_dir)
+
+    files_dir = chat_files_dir(root, chat_id)
+    if files_dir.exists():
+        shutil.rmtree(files_dir)
+
+    # Удаляем метаданные и ключи
+    for p in [chat_meta_path(root, chat_id), chat_meta_enc_path(root, chat_id), chat_keys_path(root, chat_id)]:
+        if p.exists():
+            p.unlink()
+
+    # Удаляем аватарку
+    avatar = root / ".profiles" / f"{chat_id}.png"
+    if avatar.exists():
+        avatar.unlink()
+
+    logger.info(f"Группа {chat_id} полностью удалена")

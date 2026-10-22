@@ -14,7 +14,23 @@ DB_VERSION = 2
 
 
 class LocalDB:
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls, db_path: Path | None = None):
+        """Паттерн Singleton: всегда возвращает один и тот же экземпляр."""
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+
     def __init__(self, db_path: Path | None = None):
+        # Инициализируем только один раз
+        if self._initialized:
+            return
+
         if db_path is None:
             db_path = get_local_dir() / "pygram.db"
 
@@ -23,6 +39,7 @@ class LocalDB:
 
         conn = self._get_conn()
         self._init_schema()
+        self._initialized = True
 
     def _get_conn(self) -> sqlite3.Connection:
         if not hasattr(self._local, "conn"):
@@ -98,7 +115,6 @@ class LocalDB:
         conn.commit()
 
     def delete_message(self, msg_id: str):
-        """Удаляет сообщение из локального кэша."""
         conn = self._get_conn()
         conn.execute("DELETE FROM messages WHERE msg_id = ?", (msg_id,))
         conn.commit()
@@ -114,7 +130,7 @@ class LocalDB:
         conn.commit()
 
     # ========================================================================
-    # Черновики
+    # Остальное
     # ========================================================================
 
     def save_draft(self, chat_id: str, text: str):
@@ -130,10 +146,6 @@ class LocalDB:
         row = cursor.fetchone()
         return row["text"] if row else ""
 
-    # ========================================================================
-    # Настройки
-    # ========================================================================
-
     def set_setting(self, key: str, value: str):
         conn = self._get_conn()
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
@@ -144,10 +156,6 @@ class LocalDB:
         row = cursor.fetchone()
         return row["value"] if row else default
 
-    # ========================================================================
-    # Маппинг пользователей
-    # ========================================================================
-
     def save_user_map(self, fp16: str, login: str):
         conn = self._get_conn()
         conn.execute("INSERT OR REPLACE INTO users_map (fp16, login) VALUES (?, ?)", (fp16, login))
@@ -157,10 +165,6 @@ class LocalDB:
         cursor = self._get_conn().execute("SELECT login FROM users_map WHERE fp16 = ?", (fp16,))
         row = cursor.fetchone()
         return row["login"] if row else fp16[:8]
-
-    # ========================================================================
-    # Кэш чатов
-    # ========================================================================
 
     def save_chat_cache(self, chat_id: str, chat_type: str, title: str):
         conn = self._get_conn()
@@ -179,3 +183,8 @@ class LocalDB:
         if row:
             return {"type": row["chat_type"], "title": row["title"]}
         return None
+    def delete_chat_messages(self, chat_id: str):
+        """Удаляет всю историю чата из локальной БД."""
+        conn = self._get_conn()
+        conn.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
+        conn.commit()

@@ -173,22 +173,19 @@ def get_read_messages(shared_folder: Path | str, chat_id: str, fp16: str) -> lis
 # РЕАКЦИИ
 # ============================================================================
 
-def set_reaction(
-    shared_folder: Path | str,
-    chat_id: str,
-    msg_id: str,
-    fp16: str,
-    emoji: str | None,
-) -> None:
+def set_reaction(shared_folder: Path | str, chat_id: str, msg_id: str, fp16: str, emoji: str | None):
     try:
         path = _reactions_file(shared_folder, chat_id, msg_id)
-        data: dict[str, str] = {}
+        data = {}
         if path.exists():
+            # Читаем существующие реакции
             data = json.loads(path.read_text(encoding="utf-8"))
 
         if emoji:
+            # Добавляем/обновляем реакцию этого пользователя
             data[fp16] = emoji
         else:
+            # Удаляем реакцию этого пользователя
             data.pop(fp16, None)
 
         path.write_text(json.dumps(data), encoding="utf-8")
@@ -283,3 +280,6 @@ def get_unread_count(shared_folder: Path | str, chat_id: str, my_fp16: str) -> i
         return count
     except Exception:
         return 0
+def get_reaction_users(shared_folder: Path | str, chat_id: str, msg_id: str) -> dict[str, str]:
+    """Возвращает словарь {fp16: emoji} для указанного сообщения."""
+    return get_reactions(shared_folder, chat_id, msg_id)

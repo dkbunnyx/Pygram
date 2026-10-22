@@ -14,7 +14,8 @@ from src.storage.local_db import LocalDB
 from src.core.crypto import unwrap_key, aes_encrypt, to_base64, from_base64, aes_decrypt
 from src.storage.shared_store import load_chat_keys, load_chat_meta_enc, save_chat_meta_enc
 from src.core.chat_logic import (
-    remove_group_member, toggle_group_admin, toggle_group_permission, can_edit_group_profile
+    remove_group_member, toggle_group_admin, toggle_group_permission,
+    can_edit_group_profile, delete_group_chat
 )
 
 
@@ -27,7 +28,8 @@ class GroupSettingsView(QWidget):
         self.is_creator = False
 
         self.setWindowTitle("Настройки группы")
-        self.resize(500, 500)
+        self.resize(500, 600)
+        self.setStyleSheet("QWidget { background-color: #1a1a2e; color: #cdd6f4; }")
 
         self._load_meta()
         self._setup_ui()
@@ -55,6 +57,8 @@ class GroupSettingsView(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(20, 20, 20, 20)
 
         header_layout = QHBoxLayout()
 
@@ -97,6 +101,24 @@ class GroupSettingsView(QWidget):
         layout.addWidget(QLabel("<b>Участники (ПКМ — действия):</b>"))
 
         self.list_widget = QListWidget()
+        self.list_widget.setStyleSheet("""
+            QListWidget { 
+                background-color: #252538; 
+                border: 1px solid #313148; 
+                border-radius: 8px; 
+                padding: 5px;
+            }
+            QListWidget::item { 
+                padding: 10px; 
+                font-size: 14px;
+                border-bottom: 1px solid #313148;
+            }
+            QListWidget::item:selected {
+                background-color: #313148;
+                color: #89b4fa;
+            }
+        """)
+
         db = LocalDB()
         members = self.meta.get("members", [])
         admins = self.meta.get("admins", [])
@@ -114,6 +136,29 @@ class GroupSettingsView(QWidget):
         self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list_widget.customContextMenuRequested.connect(self._on_member_context_menu)
         layout.addWidget(self.list_widget)
+
+        layout.addStretch()
+
+        # --- КНОПКА УДАЛЕНИЯ ГРУППЫ ---
+        if self.is_creator:
+            btn_delete_group = QPushButton("🗑 Удалить группу")
+            btn_delete_group.setStyleSheet("background-color: #f38ba8; color: white; font-weight: bold; padding: 10px;")
+            btn_delete_group.clicked.connect(self._on_delete_group)
+            layout.addWidget(btn_delete_group)
+
+    def _on_delete_group(self):
+        reply = QMessageBox.question(
+            self, "Удаление группы",
+            "Вы уверены, что хотите ПОЛНОСТЬЮ удалить группу?\nВсе сообщения и файлы будут стерты навсегда.",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            try:
+                delete_group_chat(self.shared_folder, self.chat_id, self.user.fp16, self.user.priv_pem)
+                QMessageBox.information(self, "Успех", "Группа удалена")
+                self.close()
+            except Exception as e:
+                QMessageBox.warning(self, "Ошибка", str(e))
 
     def _on_member_clicked(self, item):
         fp16 = item.data(Qt.UserRole)
@@ -133,14 +178,12 @@ class GroupSettingsView(QWidget):
         menu = QMenu(self)
 
         if self.is_creator:
-            # Назначить/снять админа
             if target_fp16 in self.meta.get("admins", []):
                 action_admin = menu.addAction("Снять админа")
             else:
                 action_admin = menu.addAction("Назначить админом")
             action_admin.triggered.connect(lambda: self._toggle_admin(target_fp16))
 
-            # Права (только если админ)
             if target_fp16 in self.meta.get("admins", []):
                 perms = self.meta.get("member_permissions", {}).get(target_fp16, {})
                 can_edit = perms.get("can_edit_profile", False)
@@ -153,7 +196,6 @@ class GroupSettingsView(QWidget):
                 action_remove = menu.addAction(f"{'✅' if can_remove else '❌'} Может удалять участников")
                 action_remove.triggered.connect(lambda: self._toggle_perm(target_fp16, "can_remove_members"))
 
-        # Удалить из группы
         if self.is_creator or self.meta.get("member_permissions", {}).get(self.user.fp16, {}).get("can_remove_members", False):
             menu.addSeparator()
             action_delete = menu.addAction("Удалить из группы")
