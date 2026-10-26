@@ -121,22 +121,6 @@ class MessagesModel(QAbstractListModel):
                 return True
         return False
 
-    def update_message_read_status(self, read_by_other: list):
-        """Обновляет read_by_other у всех своих сообщений в модели.
-
-        Возвращает True, если что-то изменилось (нужна перерисовка).
-        """
-        changed = False
-        for i, m in enumerate(self.messages):
-            if not m.get("is_me"):
-                continue
-            if m.get("read_by_other") != read_by_other:
-                m["read_by_other"] = read_by_other
-                idx = self.index(i)
-                self.dataChanged.emit(idx, idx, [Qt.UserRole])
-                changed = True
-        return changed
-
 
 class SyncWorker(QThread):
     finished = Signal()
@@ -607,9 +591,6 @@ class ChatViewWidget(QWidget):
 
         if msgs:
             deleted_ids = set(get_deleted_messages(self.shared_folder, self.current_chat_id, self.user.fp16))
-            read_by_other = []
-            if self.current_other_fp:
-                read_by_other = get_read_messages(self.shared_folder, self.current_chat_id, self.current_other_fp)
 
             formatted_msgs = []
             incoming_to_mark = []
@@ -623,7 +604,7 @@ class ChatViewWidget(QWidget):
                     "text": m["text"],
                     "ts": m["ts"],
                     "is_me": (m["sender_fp16"] == self.user.fp16),
-                    "read_by_other": read_by_other,
+                    "read_status": "",  # Пусто, _refresh_read_status обновит при необходимости
                     "reactions": self._get_reactions_cached(m["msg_id"]),
                 })
 
@@ -681,25 +662,50 @@ class ChatViewWidget(QWidget):
                 self.messages_model.update_message_reactions(m["msg_id"], new_reactions)
 
     def _refresh_read_status_if_changed(self) -> None:
-        """Обновляет read_by_other у своих сообщений, если в шаре
-        появились новые прочтения. Дёргает dataChanged только при
-        изменении, чтобы не перерисовывать зря каждые 500 мс."""
-        if not self.current_other_fp:
+        if not self.current_chat_id:
             return
 
+        from src.core.chat_logic import get_chat_recipients
+
         try:
-            read_by_other = get_read_messages(
-                self.shared_folder, self.current_chat_id, self.current_other_fp,
-            )
+            recipients = get_chat_recipients(self.shared_folder, self.current_chat_id)
+            other_recipients = [fp for fp in recipients if fp != self.user.fp16]
         except Exception:
             return
 
-        h = hash(frozenset(read_by_other))
+        if not other_recipients:
+            return
+
+        read_by_users = {}
+        for fp in other_recipients:
+            read_by_users[fp] = set(get_read_messages(self.shared_folder, self.current_chat_id, fp))
+
+        h = hash(tuple((fp, frozenset(msgs)) for fp, msgs in sorted(read_by_users.items())))
         if h == self._last_read_hash:
             return
         self._last_read_hash = h
 
-        self.messages_model.update_message_read_status(read_by_other)
+        is_group = self.current_chat_id.startswith("grp_")
+
+        for i, m in enumerate(self.messages_model.messages):
+            if not m.get("is_me"):
+                continue
+
+            msg_id = m["msg_id"]
+
+            # Определяем статус: True (все прочитали) или False
+            if is_group:
+                is_read_by_all = all(msg_id in read_by_users[fp] for fp in other_recipients)
+            else:
+                is_read_by_all = (msg_id in read_by_users[other_recipients[0]])
+
+            # Передаем строку "all", если прочитано, иначе пустую строку
+            new_status = "all" if is_read_by_all else ""
+
+            if m.get("read_status") != new_status:
+                m["read_status"] = new_status
+                idx = self.messages_model.index(i)
+                self.messages_model.dataChanged.emit(idx, idx, [Qt.UserRole])
 
     def _sync_and_render(self):
         if not self.current_chat_id:
@@ -734,12 +740,6 @@ class ChatViewWidget(QWidget):
                 self.messages_model.messages[-1]["ts"]
                 if self.messages_model.messages else 0
             )
-            read_by_other = (
-                get_read_messages(
-                    self.shared_folder, self.current_chat_id, self.current_other_fp
-                )
-                if self.current_other_fp else []
-            )
 
             new_msgs = []
             incoming_to_mark = []
@@ -753,7 +753,7 @@ class ChatViewWidget(QWidget):
                     "text": m["text"],
                     "ts": m["ts"],
                     "is_me": (m["sender_fp16"] == self.user.fp16),
-                    "read_by_other": read_by_other,
+                    "read_status": "",  # Статус обновится ниже
                     "reactions": self._get_reactions_cached(m["msg_id"]),
                 })
                 if m["sender_fp16"] != self.user.fp16:
@@ -806,7 +806,7 @@ class ChatViewWidget(QWidget):
             "text": text,
             "ts": temp_ts,
             "is_me": True,
-            "read_by_other": [],
+            "read_status": "",
             "reactions": {}
         }
         self.messages_model.add_messages([optimistic_msg])

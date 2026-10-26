@@ -99,12 +99,13 @@ class MessageDelegate(QStyledItemDelegate):
 
         dt = datetime.fromtimestamp(ts / 1000)
         time_str = dt.strftime("%H:%M")
+
         if is_me:
-            # Группы: только ✓ (отправлено), DM: ✓ или ✓✓ (прочитано)
-            if self.show_header:
-                checkmark = " ✓"
+            read_status = msg_data.get("read_status", "")
+            if read_status == "all":
+                checkmark = " ✓✓"
             else:
-                checkmark = " ✓✓" if msg_id in read_by_other else " ✓"
+                checkmark = " ✓"
             time_str += checkmark
 
         time_font = QFont("Segoe UI", 8)
