@@ -10,7 +10,10 @@ from PySide6.QtCore import Qt, Signal, QSize
 from PySide6.QtGui import QColor, QIcon, QPixmap
 from loguru import logger
 
-from src.core.chat_logic import list_user_chats, create_dm_chat, list_all_chats, create_group_chat
+from src.core.chat_logic import (
+    list_user_chats, create_dm_chat, list_all_chats, create_group_chat,
+    get_group_display_name,
+)
 from src.storage.local_db import LocalDB
 from src.core.crypto import unwrap_key, aes_decrypt, from_base64
 from src.storage.shared_store import load_chat_keys, load_chat_meta_enc
@@ -58,25 +61,12 @@ class ChatListWidget(QWidget):
         self.list_widget.itemClicked.connect(self._on_item_clicked)
         layout.addWidget(self.list_widget)
 
-    def _get_group_name(self, chat_id: str) -> str:
-        if not self.user_priv_pem:
-            return f"Группа {chat_id[4:12]}"
-        try:
-            keys = load_chat_keys(self.shared_folder, chat_id)
-            wrapped = keys.get("wrapped", {})
-            if self.user_fp16 in wrapped:
-                group_key = unwrap_key(wrapped, self.user_fp16, self.user_priv_pem)
-                enc = load_chat_meta_enc(self.shared_folder, chat_id)
-                data = json.loads(enc.decode("utf-8"))
-
-                if "nonce" in data and "ciphertext" in data:
-                    aad = f"chat_id={chat_id}|meta".encode("utf-8")
-                    decrypted = aes_decrypt(group_key, from_base64(data["nonce"]), from_base64(data["ciphertext"]), aad=aad)
-                    meta = json.loads(decrypted.decode("utf-8"))
-                    return meta.get("name", f"Группа {chat_id[4:12]}")
-        except Exception as e:
-            logger.error(f"Не удалось расшифровать имя группы {chat_id}: {e}")
-        return f"Группа {chat_id[4:12]}"
+    # П.7: общий хелпер вместо локального _get_group_name
+    def _group_name_or_default(self, chat_id: str) -> str:
+        return get_group_display_name(
+            self.shared_folder, chat_id, self.user_fp16, self.user_priv_pem,
+            default=f"Группа {chat_id[4:12]}",
+        ) or f"Группа {chat_id[4:12]}"
 
     def refresh_chats(self):
         self.list_widget.clear()
@@ -146,7 +136,8 @@ class ChatListWidget(QWidget):
                 display_name = "Личный чат"
 
         elif chat_type == "group":
-            display_name = self._get_group_name(chat_id)
+            # П.7: единый get_group_display_name
+            display_name = self._group_name_or_default(chat_id)
 
             avatar_path = self.profile_dir / f"{chat_id}.png"
             if avatar_path.exists():
@@ -200,7 +191,7 @@ class ChatListWidget(QWidget):
                     else:
                         title = "Личный чат"
                 elif chat_type == "group":
-                    title = self._get_group_name(chat_id)
+                    title = self._group_name_or_default(chat_id)
                 elif chat_type == "favorites":
                     title = "Избранное"
                 elif chat_type == "admin_chat":

@@ -17,13 +17,6 @@ class LocalDB:
     _instance = None
     _lock = threading.Lock()
 
-    def __new__(cls, db_path: Path | None = None):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-                    cls._instance._initialized = False
-        return cls._instance
 
     def __init__(self, db_path: Path | None = None):
         if self._initialized:
@@ -230,7 +223,6 @@ class LocalDB:
             return {"type": row["chat_type"], "title": row["title"]}
         return None
     def __new__(cls, db_path: Path | None = None):
-        # Для тестов: если передан явный путь, создаём НОВЫЙ экземпляр
         if db_path is not None:
             instance = super().__new__(cls)
             instance._initialized = False

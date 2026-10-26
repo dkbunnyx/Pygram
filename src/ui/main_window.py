@@ -77,15 +77,14 @@ class MainWindow(QMainWindow):
         self.notification_timer.start(3000)
 
     def _on_chat_selected(self, chat_id: str):
-        # 1. Помечаем ВСЕ сообщения этого чата прочитанными в БД (мгновенно)
-        # (Даже если они еще не отрисованы, чтобы счетчик сразу пропал)
+        # 1. Помечаем сообщения прочитанными ТОЛЬКО в локальной БД —
+        #    для счётчика. Запись в шару (для галочек у отправителя)
+        #    сделает chat_view._load_page() через mark_messages_read().
         try:
             db = LocalDB()
-            # Получаем все сообщения этого чата (только ID и отправителя)
             all_msgs = db.get_messages(chat_id)
             my_fp16 = self.user.fp16
 
-            # Собираем ID всех сообщений, которые отправил НЕ я
             incoming_ids = [m["msg_id"] for m in all_msgs if m["sender_fp16"] != my_fp16]
 
             if incoming_ids:
@@ -94,11 +93,11 @@ class MainWindow(QMainWindow):
             from loguru import logger
             logger.error(f"Ошибка при отметке прочитанных: {e}")
 
-        # 2. Загружаем сам чат (это отрисует сообщения)
+        # 2. Загружаем сам чат
         self.chat_view.load_chat(chat_id)
         self.chat_list.current_open_chat_id = chat_id
 
-        # 3. Обновляем список чатов (теперь счетчик уже не покажется, т.к. БД обновлена)
+        # 3. Обновляем список чатов (счётчик уже не покажется)
         self.chat_list.refresh_chats()
 
     def closeEvent(self, event):

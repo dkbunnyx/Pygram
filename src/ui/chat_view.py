@@ -5,23 +5,22 @@ import json
 import os
 import shutil
 from datetime import datetime
-from functools import lru_cache
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QDialog,
     QListView, QListWidget, QListWidgetItem, QLineEdit, QPushButton,
     QLabel, QFileDialog, QMessageBox, QMenu, QAbstractItemView,
     QProgressBar
 )
-from PySide6.QtCore import Qt, QUrl, QEvent, QTimer, QThread, Signal, QAbstractListModel, QModelIndex, QPoint
-from PySide6.QtGui import QDesktopServices, QKeySequence, QPixmap, QGuiApplication, QPainter, QIcon
+from PySide6.QtCore import Qt, QEvent, QTimer, QThread, Signal, QAbstractListModel, QModelIndex, QPoint
+from PySide6.QtGui import QKeySequence, QPixmap, QGuiApplication, QPainter
 from loguru import logger
 import tempfile
 import time
 
 from src.core.message import (
-    read_messages, read_new_messages, send_message, send_file, Message, sync_messages_to_db
+    send_message, send_file, sync_messages_to_db
 )
-from src.core.chat_logic import get_chat_meta, delete_group_chat
+from src.core.chat_logic import get_chat_meta, delete_group_chat, get_group_display_name
 from src.core.crypto import unwrap_key, aes_decrypt, from_base64
 from src.core.admin import can_read_all_chats
 from src.storage.local_db import LocalDB
@@ -122,6 +121,22 @@ class MessagesModel(QAbstractListModel):
                 return True
         return False
 
+    def update_message_read_status(self, read_by_other: list):
+        """Обновляет read_by_other у всех своих сообщений в модели.
+
+        Возвращает True, если что-то изменилось (нужна перерисовка).
+        """
+        changed = False
+        for i, m in enumerate(self.messages):
+            if not m.get("is_me"):
+                continue
+            if m.get("read_by_other") != read_by_other:
+                m["read_by_other"] = read_by_other
+                idx = self.index(i)
+                self.dataChanged.emit(idx, idx, [Qt.UserRole])
+                changed = True
+        return changed
+
 
 class SyncWorker(QThread):
     finished = Signal()
@@ -187,7 +202,7 @@ class DeleteWorker(QThread):
 
 class DownloadWorker(QThread):
     """Поток для скачивания файла с обновлением прогресса."""
-    progress = Signal(int, int, int) # (процент, скачано_байт, всего_байт)
+    progress = Signal(int, int, int)  # (процент, скачано_байт, всего_байт)
     finished = Signal(bool, str)
 
     def __init__(self, src_path: Path, dest_path: Path):
@@ -292,6 +307,10 @@ class ChatViewWidget(QWidget):
         self._last_deleted_count = -1
         self._last_file_count = -1
         self._last_reactions_hash = -1
+        self._last_read_hash = -1
+
+        # П.9: кэш реакций по msg_id
+        self._reactions_cache: dict[str, dict] = {}
 
         self.selection_mode = False
         self.selected_msg_ids = set()
@@ -319,11 +338,28 @@ class ChatViewWidget(QWidget):
         self.typing_timer.timeout.connect(self._stop_typing)
 
         self.transport = FileTransport(shared_folder)
-        self.transport.watch(".", self._on_file_changed)
+        # П.4: watchdog запускается в load_chat() на папку конкретного чата.
+        # Watch на всю шару ('.') не используем — дорого и шумно.
 
     def _on_file_changed(self, path: str):
         if self.current_chat_id and self.current_chat_id in path:
             QTimer.singleShot(0, self._trigger_sync)
+
+    def _rewatch_current_chat(self) -> None:
+        """Перезапускает watchdog на папку сообщений текущего чата."""
+        try:
+            self.transport.stop_watch()
+        except Exception as e:
+            logger.debug(f"stop_watch: {e}")
+
+        if not self.current_chat_id:
+            return
+
+        rel_dir = f"message/{self.current_chat_id}"
+        try:
+            self.transport.watch(rel_dir, self._on_file_changed)
+        except Exception as e:
+            logger.error(f"Не удалось запустить watchdog на {rel_dir}: {e}")
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -475,6 +511,10 @@ class ChatViewWidget(QWidget):
         self._last_deleted_count = -1
         self._last_file_count = -1
         self._last_reactions_hash = -1
+        self._last_read_hash = -1
+        self._reactions_cache.clear()
+
+        self._rewatch_current_chat()
 
         if self.selection_mode:
             self._exit_selection_mode()
@@ -507,7 +547,9 @@ class ChatViewWidget(QWidget):
                 title = "Админ-чат"
 
         if chat_type == "group" and title.startswith("Группа "):
-            real_name = self._force_load_group_name(chat_id)
+            real_name = get_group_display_name(
+                self.shared_folder, chat_id, self.user.fp16, self.user.priv_pem,
+            )
             if real_name:
                 title = real_name
                 self.db.save_chat_cache(chat_id, "group", title)
@@ -582,7 +624,7 @@ class ChatViewWidget(QWidget):
                     "ts": m["ts"],
                     "is_me": (m["sender_fp16"] == self.user.fp16),
                     "read_by_other": read_by_other,
-                    "reactions": get_reactions(self.shared_folder, self.current_chat_id, m["msg_id"])
+                    "reactions": self._get_reactions_cached(m["msg_id"]),
                 })
 
                 if m["sender_fp16"] != self.user.fp16:
@@ -592,24 +634,92 @@ class ChatViewWidget(QWidget):
             self.loaded_offset += self.limit
 
             if incoming_to_mark:
+                # Локальная БД (для счётчика и UI)
                 self.db.mark_messages_read(self.current_chat_id, incoming_to_mark)
+                # Шара (для галочек у отправителя)
+                mark_messages_read(
+                    self.shared_folder, self.current_chat_id,
+                    self.user.fp16, incoming_to_mark,
+                )
+
+    def _get_reactions_cached(self, msg_id: str) -> dict:
+        """Реакции из кэша; при отсутствии — читает и кладёт в кэш."""
+        if msg_id not in self._reactions_cache:
+            self._reactions_cache[msg_id] = get_reactions(
+                self.shared_folder, self.current_chat_id, msg_id
+            )
+        return self._reactions_cache[msg_id]
+
+    def _refresh_reactions_if_changed(self) -> None:
+        """Считает хеш папки реакций текущего чата; если изменился —
+        обновляет кэш и перерисовывает только затронутые сообщения."""
+        reactions_dir = Path(self.shared_folder) / DIR_STATUS / "reactions"
+        if not reactions_dir.is_dir():
+            return
+
+        h = 0
+        try:
+            for f in reactions_dir.glob(f"{self.current_chat_id}_*.json"):
+                try:
+                    st = f.stat()
+                    h = hash((h, f.name, st.st_mtime_ns, st.st_size))
+                except OSError:
+                    continue
+        except OSError:
+            return
+
+        if h == self._last_reactions_hash:
+            return
+        self._last_reactions_hash = h
+
+        for m in self.messages_model.messages:
+            new_reactions = get_reactions(
+                self.shared_folder, self.current_chat_id, m["msg_id"]
+            )
+            self._reactions_cache[m["msg_id"]] = new_reactions
+            if new_reactions != m.get("reactions", {}):
+                self.messages_model.update_message_reactions(m["msg_id"], new_reactions)
+
+    def _refresh_read_status_if_changed(self) -> None:
+        """Обновляет read_by_other у своих сообщений, если в шаре
+        появились новые прочтения. Дёргает dataChanged только при
+        изменении, чтобы не перерисовывать зря каждые 500 мс."""
+        if not self.current_other_fp:
+            return
+
+        try:
+            read_by_other = get_read_messages(
+                self.shared_folder, self.current_chat_id, self.current_other_fp,
+            )
+        except Exception:
+            return
+
+        h = hash(frozenset(read_by_other))
+        if h == self._last_read_hash:
+            return
+        self._last_read_hash = h
+
+        self.messages_model.update_message_read_status(read_by_other)
 
     def _sync_and_render(self):
         if not self.current_chat_id:
             return
 
-        current_deleted = set(get_deleted_messages(self.shared_folder, self.current_chat_id, self.user.fp16))
+        # --- 1. Удалённые ---
+        current_deleted = set(
+            get_deleted_messages(self.shared_folder, self.current_chat_id, self.user.fp16)
+        )
         if len(current_deleted) != self._last_deleted_count:
             self._last_deleted_count = len(current_deleted)
-            to_remove = []
-            for i in range(self.messages_model.rowCount()):
-                m = self.messages_model.messages[i]
-                if m["msg_id"] in current_deleted:
-                    to_remove.append(m["msg_id"])
+            to_remove = [
+                m["msg_id"] for m in self.messages_model.messages
+                if m["msg_id"] in current_deleted
+            ]
             for mid in to_remove:
                 self.messages_model.remove_message_by_id(mid)
                 self.db.delete_message(mid)
 
+        # --- 2. Новые файлы сообщений ---
         msg_dir = chat_message_dir(self.shared_folder, self.current_chat_id)
         if msg_dir.is_dir():
             current_count = len(list(msg_dir.glob("*.bin")))
@@ -617,53 +727,51 @@ class ChatViewWidget(QWidget):
                 self._last_file_count = current_count
                 self._trigger_sync()
 
+        # --- 3. Новые сообщения из БД ---
         msgs = self.db.get_messages_paginated(self.current_chat_id, 50, 0)
         if msgs:
-            last_ts_in_model = self.messages_model.messages[-1]["ts"] if self.messages_model.messages else 0
-            new_msgs = []
-            read_by_other = get_read_messages(self.shared_folder, self.current_chat_id, self.current_other_fp) if self.current_other_fp else []
+            last_ts_in_model = (
+                self.messages_model.messages[-1]["ts"]
+                if self.messages_model.messages else 0
+            )
+            read_by_other = (
+                get_read_messages(
+                    self.shared_folder, self.current_chat_id, self.current_other_fp
+                )
+                if self.current_other_fp else []
+            )
 
+            new_msgs = []
             incoming_to_mark = []
 
             for m in msgs:
-                if m["ts"] > last_ts_in_model:
-                    new_msgs.append({
-                        "msg_id": m["msg_id"],
-                        "sender_fp16": m["sender_fp16"],
-                        "text": m["text"],
-                        "ts": m["ts"],
-                        "is_me": (m["sender_fp16"] == self.user.fp16),
-                        "read_by_other": read_by_other,
-                        "reactions": get_reactions(self.shared_folder, self.current_chat_id, m["msg_id"])
-                    })
-
-                    if m["sender_fp16"] != self.user.fp16:
-                        incoming_to_mark.append(m["msg_id"])
+                if m["ts"] <= last_ts_in_model:
+                    continue
+                new_msgs.append({
+                    "msg_id": m["msg_id"],
+                    "sender_fp16": m["sender_fp16"],
+                    "text": m["text"],
+                    "ts": m["ts"],
+                    "is_me": (m["sender_fp16"] == self.user.fp16),
+                    "read_by_other": read_by_other,
+                    "reactions": self._get_reactions_cached(m["msg_id"]),
+                })
+                if m["sender_fp16"] != self.user.fp16:
+                    incoming_to_mark.append(m["msg_id"])
 
             if new_msgs:
                 self.messages_model.add_messages(new_msgs)
                 self.messages_view.scrollToBottom()
-
                 if incoming_to_mark:
                     self.db.mark_messages_read(self.current_chat_id, incoming_to_mark)
+                    mark_messages_read(
+                        self.shared_folder, self.current_chat_id,
+                        self.user.fp16, incoming_to_mark,
+                    )
 
-        reactions_dir = Path(self.shared_folder) / DIR_STATUS / "reactions"
-        if reactions_dir.is_dir():
-            current_reactions_str = ""
-            for f in reactions_dir.glob(f"{self.current_chat_id}_*.json"):
-                try:
-                    current_reactions_str += f.read_text(encoding="utf-8")
-                except:
-                    pass
-
-            current_hash = hash(current_reactions_str)
-            if current_hash != self._last_reactions_hash:
-                self._last_reactions_hash = current_hash
-                for i in range(self.messages_model.rowCount()):
-                    m = self.messages_model.messages[i]
-                    new_reactions = get_reactions(self.shared_folder, self.current_chat_id, m["msg_id"])
-                    if new_reactions != m.get("reactions", {}):
-                        self.messages_model.update_message_reactions(m["msg_id"], new_reactions)
+        # --- 4. Реакции и прочтения (только при изменении) ---
+        self._refresh_reactions_if_changed()
+        self._refresh_read_status_if_changed()
 
     def _trigger_sync(self):
         if self._sync_worker and self._sync_worker.isRunning():
@@ -1023,7 +1131,6 @@ class ChatViewWidget(QWidget):
             action_save = menu.addAction("💾 Сохранить как...")
             action_save.triggered.connect(lambda: self._save_file_dialog(file_path, original_name))
 
-            # Реакции для файлов
             quick_emoji = self.db.get_setting("quick_reaction", "❤️")
             reactions = get_reactions(self.shared_folder, self.current_chat_id, msg_id)
             my_reaction = reactions.get(self.user.fp16)
@@ -1145,11 +1252,35 @@ class ChatViewWidget(QWidget):
         dialog.exec()
 
     def _set_reaction(self, msg_id: str, emoji: str):
-        set_reaction(self.shared_folder, self.current_chat_id, msg_id, self.user.fp16, emoji)
+        try:
+            set_reaction(
+                self.shared_folder, self.current_chat_id, msg_id,
+                self.user.fp16, emoji,
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось поставить реакцию: {e}")
+            QMessageBox.warning(
+                self, "Сеть",
+                "Не удалось сохранить реакцию на сетевой папке.\n"
+                "Попробуйте ещё раз через пару секунд.",
+            )
+            return
         self._sync_and_render()
 
     def _remove_reaction(self, msg_id: str):
-        set_reaction(self.shared_folder, self.current_chat_id, msg_id, self.user.fp16, None)
+        try:
+            set_reaction(
+                self.shared_folder, self.current_chat_id, msg_id,
+                self.user.fp16, None,
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось убрать реакцию: {e}")
+            QMessageBox.warning(
+                self, "Сеть",
+                "Не удалось обновить реакцию на сетевой папке.\n"
+                "Попробуйте ещё раз через пару секунд.",
+            )
+            return
         self._sync_and_render()
 
     def _open_reaction_picker(self, msg_id: str):
@@ -1186,20 +1317,3 @@ class ChatViewWidget(QWidget):
         self.input_field.setText(new_text)
         self.input_field.setCursorPosition(cursor_pos + len(emoji))
         self.input_field.setFocus()
-
-    def _force_load_group_name(self, chat_id: str) -> str | None:
-        try:
-            keys = load_chat_keys(self.shared_folder, chat_id)
-            wrapped = keys.get("wrapped", {})
-            if self.user.fp16 in wrapped:
-                group_key = unwrap_key(wrapped, self.user.fp16, self.user.priv_pem)
-                enc = load_chat_meta_enc(self.shared_folder, chat_id)
-                data = json.loads(enc.decode("utf-8"))
-                if "nonce" in data and "ciphertext" in data:
-                    aad = f"chat_id={chat_id}|meta".encode("utf-8")
-                    decrypted = aes_decrypt(group_key, from_base64(data["nonce"]), from_base64(data["ciphertext"]), aad=aad)
-                    meta_group = json.loads(decrypted.decode("utf-8"))
-                    return meta_group.get("name")
-        except Exception:
-            pass
-        return None

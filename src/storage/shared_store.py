@@ -15,12 +15,24 @@
     message/<chat_id>/*.bin          — сообщения
     files/<chat_id>/*                — вложения
     .status/<chat_id>/*              — статусы доставки
+
+SMB-специфика:
+    На сетевых папках Windows (Z:\\, \\\\server\\share) rename/replace
+    может падать с WinError 5 (ACCESS_DENIED), если файл держит
+    антивирус, Windows Search Indexer или другой клиент.
+    Поэтому write_bytes_atomic:
+      - использует UUID в имени .tmp (нет коллизий между клиентами);
+      - делает retry с экспоненциальным backoff;
+      - в крайнем случае падает в прямую запись (не атомарно,
+        но данные не теряются).
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -66,17 +78,59 @@ def ensure_shared_structure(shared_folder: Path | str) -> None:
     logger.debug(f"Структура шары готова: {root}")
 
 
-def write_bytes_atomic(path: Path, data: bytes) -> None:
+def write_bytes_atomic(path: Path, data: bytes, retries: int = 5) -> None:
     """Атомарная запись bytes через .tmp + os.replace.
+
+    На SMB (сетевые папки Windows) rename/replace может падать с
+    WinError 5 (файл занят антивирусом/индексатором/другим клиентом).
+    Поэтому:
+      - .tmp с уникальным именем (UUID) — два клиента не бьются за один .tmp;
+      - retry с экспоненциальным backoff;
+      - финальный fallback — прямая запись без atomic (лучше потерять
+        атомарность, чем потерять данные).
 
     Args:
         path: Куда писать.
         data: Что писать.
+        retries: Сколько попыток replace сделать до fallback.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+
+    # Уникальный .tmp: два клиента одновременно не мешают друг другу
+    tmp = path.with_suffix(path.suffix + f".{uuid.uuid4().hex[:8]}.tmp")
+
     tmp.write_bytes(data)
-    tmp.replace(path)
+
+    last_err: Exception | None = None
+    for attempt in range(retries):
+        try:
+            tmp.replace(path)
+            return  # успех
+        except (PermissionError, OSError) as e:
+            last_err = e
+            # На SMB WinError 5 — часто транзиентная (антивирус/индексатор)
+            delay = 0.05 * (2 ** attempt)  # 50, 100, 200, 400, 800 мс
+            logger.debug(
+                f"write_bytes_atomic: replace failed (attempt {attempt + 1}/{retries}, "
+                f"retry in {delay:.2f}s): {e}"
+            )
+            time.sleep(delay)
+            if not tmp.exists():
+                # Кто-то (антивирус?) уже удалил tmp — пересоздадим
+                tmp.write_bytes(data)
+
+    # Fallback: прямая запись. Не атомарно, но данные не потеряем.
+    logger.warning(
+        f"write_bytes_atomic: atomic replace failed after {retries} attempts "
+        f"({last_err}), falling back to direct write: {path}"
+    )
+    try:
+        path.write_bytes(data)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def write_json_atomic(path: Path, data: Any) -> None:
@@ -157,7 +211,6 @@ def save_login_marker(
         login: Логин (открытым текстом — НЕ сохраняется).
         fp: Fingerprint публичного ключа.
     """
-    import time
     path = login_marker_path(shared_folder, login)
     if path.exists():
         raise FileExistsError(f"Логин уже существует: {login}")
@@ -250,6 +303,8 @@ def load_identity_blob(shared_folder: Path | str, fp: str) -> bytes:
     """
     path = identity_path(shared_folder, fp)
     return path.read_bytes()
+
+
 # ============================================================================
 # ЧАТЫ: .meta/ и групповые ключи
 # ============================================================================

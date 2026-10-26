@@ -16,7 +16,8 @@ from src.core.crypto import (
     unwrap_key, hybrid_encrypt, hybrid_decrypt, fingerprint, load_private_key,
     make_message_aad,
 )
-from src.core.admin import load_admins, can_read_all_chats
+# П.2: verified — подписи проверены. load_admins (сырой) НЕ используем.
+from src.core.admin import load_admins_verified, can_read_all_chats
 from src.storage.shared_store import (
     chat_message_dir, chat_files_dir, load_chat_keys, load_chat_meta,
     load_chat_meta_enc, load_pub_key_by_fp16, write_bytes_atomic,
@@ -90,7 +91,9 @@ def send_message(shared_folder, chat_id, sender_fp16, sender_priv_pem, text) -> 
         enc = load_chat_meta_enc(shared_folder, chat_id)
         participants = json.loads(enc.decode("utf-8")).get("participants", [])
 
-        admins_data = load_admins(shared_folder)
+        # ВАЖНО: verified — подписи проверены. Иначе злоумышленник,
+        # дописавший себя в .admins/list.json без подписи, получит ключи.
+        admins_data = load_admins_verified(shared_folder)
         admin_fps = [
             a["fp16"] for a in admins_data
             if a.get("is_super") or a.get("can_read_all_chats")

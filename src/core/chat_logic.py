@@ -162,28 +162,56 @@ def get_chat_meta(shared_folder: Path | str, chat_id: str) -> dict:
 
 
 def is_chat_visible(shared_folder: Path | str, chat_id: str, fp16: str) -> bool:
+    """Виден ли чат пользователю fp16.
+
+    Правила (согласованы с list_user_chats / get_chat_recipients):
+      - admin_chat  : только админы;
+      - dm          : участники + админы с can_read_all_chats;
+      - favorites   : владелец + админы с can_read_all_chats;
+      - group       : участники (есть wrapped) + админы с can_read_all_chats.
+    """
     try:
         meta = load_chat_meta(shared_folder, chat_id)
-    except FileNotFoundError:
+    except (FileNotFoundError, ValueError):
         return False
 
     t = meta["type"]
+
     if t == "admin_chat":
         return is_admin(shared_folder, fp16)
 
-    if t == "dm":
-        enc = load_chat_meta_enc(shared_folder, chat_id)
-        participants = json.loads(enc.decode("utf-8")).get("participants", [])
-        if fp16 in participants:
-            return True
-        # Админ с правом чтения видит DM (как и в _prepare_chat_keys)
+    # Для DM и favorites участники лежат в расшифрованных .enc
+    if t in ("dm", "favorites"):
+        try:
+            enc = load_chat_meta_enc(shared_folder, chat_id)
+            data = json.loads(enc.decode("utf-8"))
+        except (FileNotFoundError, ValueError, json.JSONDecodeError):
+            return False
+
+        if t == "dm":
+            participants = data.get("participants", [])
+            if fp16 in participants:
+                return True
+        else:  # favorites
+            owner = data.get("owner")
+            if owner == fp16:
+                return True
+            # Если owner не записан (старый формат) — fallback на chat_id
+            if owner is None and chat_id == f"fav_{fp16}":
+                return True
+
+        # Админ с правом чтения видит DM и favorites (как в send_message)
         return can_read_all_chats(shared_folder, fp16)
 
+    # Группы
     try:
         keys = load_chat_keys(shared_folder, chat_id)
-        return fp16 in keys.get("wrapped", {})
-    except FileNotFoundError:
-        return False
+        if fp16 in keys.get("wrapped", {}):
+            return True
+    except (FileNotFoundError, ValueError):
+        pass
+
+    return can_read_all_chats(shared_folder, fp16)
 
 
 def list_user_chats(shared_folder: Path | str, fp16: str) -> list[dict]:
@@ -398,3 +426,60 @@ def delete_group_chat(shared_folder: Path | str, chat_id: str, by_fp16: str, by_
         avatar.unlink()
 
     logger.info(f"Группа {chat_id} полностью удалена")
+
+
+# ============================================================================
+# ОТОБРАЖЕНИЕ: имя группы
+# ============================================================================
+
+def get_group_display_name(
+    shared_folder: Path | str,
+    chat_id: str,
+    fp16: str,
+    priv_pem: str,
+    default: str | None = None,
+) -> str | None:
+    """Возвращает расшифрованное имя группы или default/None.
+
+    Безопасно: при любой ошибке (нет ключа, битый .enc, нет прав)
+    возвращает default, не бросает.
+
+    Args:
+        shared_folder: Корень шары.
+        chat_id: grp_<uuid>.
+        fp16: Кто запрашивает (ищем его wrapped-ключ).
+        priv_pem: Приватный ключ запрашивающего.
+        default: Что вернуть при неудаче (по умолчанию None).
+
+    Returns:
+        Имя группы или default.
+    """
+    from src.core.crypto import unwrap_key, aes_decrypt, from_base64
+    from src.storage.shared_store import load_chat_keys, load_chat_meta_enc
+
+    try:
+        keys = load_chat_keys(shared_folder, chat_id)
+        wrapped = keys.get("wrapped", {})
+        if fp16 not in wrapped:
+            return default
+
+        group_key = unwrap_key(wrapped, fp16, priv_pem)
+        enc = load_chat_meta_enc(shared_folder, chat_id)
+        data = json.loads(enc.decode("utf-8"))
+
+        if "nonce" in data and "ciphertext" in data:
+            aad = f"chat_id={chat_id}|meta".encode("utf-8")
+            decrypted = aes_decrypt(
+                group_key,
+                from_base64(data["nonce"]),
+                from_base64(data["ciphertext"]),
+                aad=aad,
+            )
+            meta = json.loads(decrypted.decode("utf-8"))
+            return meta.get("name") or default
+
+        # Старый формат: name открытым текстом (не должно быть, но fallback)
+        return data.get("name") or default
+    except Exception as e:
+        logger.debug(f"get_group_display_name({chat_id}) failed: {e}")
+        return default
