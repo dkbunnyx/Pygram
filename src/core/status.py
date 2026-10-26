@@ -419,11 +419,22 @@ def physically_delete_all_messages(shared_folder: Path | str, chat_id: str) -> N
     if msg_dir.exists():
         try:
             shutil.rmtree(msg_dir)
-            # Папку НЕ пересоздаем здесь. Она создастся сама при отправке нового сообщения.
+            # Папку не пересоздаем, она появится при новом сообщении
             logger.info(f"Сообщения чата {chat_id} физически удалены с шары")
         except Exception as e:
-            # Если папки нет или она уже удалена, WinError 183 или FileNotFoundError не страшны
-            if "существует" in str(e) or "cannot find" in str(e).lower():
-                pass
-            else:
-                logger.error(f"Ошибка физического удаления сообщений {chat_id}: {e}")
+            logger.error(f"Ошибка физического удаления сообщений {chat_id}: {e}")
+
+
+def physically_delete_single_message(shared_folder: Path | str, chat_id: str, msg_id: str) -> None:
+    """Физически удаляет один файл .bin с шары."""
+    from src.storage.shared_store import chat_message_dir
+
+    msg_dir = chat_message_dir(shared_folder, chat_id)
+    file_path = msg_dir / f"{msg_id}.bin"
+
+    if file_path.exists():
+        try:
+            file_path.unlink()
+            logger.info(f"Сообщение {msg_id} физически удалено с шары")
+        except Exception as e:
+            logger.error(f"Ошибка удаления файла {msg_id}: {e}")

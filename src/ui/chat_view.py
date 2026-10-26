@@ -176,12 +176,24 @@ class DeleteWorker(QThread):
 
     def run(self):
         try:
+            from src.core.status import physically_delete_single_message
+
             for msg_id in self.msg_ids:
-                if not msg_id.startswith("pending_"):
-                    delete_message(self.shared_folder, self.chat_id, msg_id, self.user_fp16, self.for_everyone)
-            self.finished.emit()
+                if msg_id.startswith("pending_"):
+                    continue
+
+                # Сначала пытаемся физически удалить файл
+                physically_delete_single_message(self.shared_folder, self.chat_id, msg_id)
+
+                # Если это НЕ "удалить у всех", то еще и скрываем в статусах (на всякий случай)
+                if not self.for_everyone:
+                    from src.core.status import delete_message
+                    delete_message(self.shared_folder, self.chat_id, msg_id, self.user_fp16, for_everyone=False)
+
         except Exception as e:
             logger.error(f"Ошибка фонового удаления: {e}")
+        finally:
+            self.finished.emit()
 
 
 class DownloadWorker(QThread):
@@ -871,17 +883,22 @@ class ChatViewWidget(QWidget):
 
         for_everyone = (msg_box.clickedButton() == btn_all)
 
+        # Берем КОПИЮ списка, так как при удалении из модели он может меняться
         msgs_to_delete = list(self.selected_msg_ids)
+
+        # Удаляем из локальной БД и из модели (визуально)
         for msg_id in msgs_to_delete:
             self.db.delete_message(msg_id)
             self.messages_model.remove_message_by_id(msg_id)
 
         self._exit_selection_mode()
 
+        # Запускаем фоновое удаление с шары
         worker = DeleteWorker(
             self.shared_folder, self.current_chat_id,
             msgs_to_delete, self.user.fp16, for_everyone, self.db
         )
+        # Важно: нельзя удалять воркер из списка до его завершения
         self._active_workers.append(worker)
         worker.start()
 
