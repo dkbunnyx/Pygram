@@ -1,5 +1,8 @@
 """Точка входа Pygram."""
 
+import psutil
+import sys
+from pathlib import Path
 import sys
 from pathlib import Path
 

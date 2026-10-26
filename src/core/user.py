@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import psutil
+#import psutil
 from loguru import logger
 
 from config import get_config
@@ -93,7 +93,7 @@ def _save_session(user: User) -> None:
         "fp16": user.fp16,
         "created_at": now,
         "expires_at": now + ttl * 1000,
-        "boot_time": int(psutil.boot_time()),
+        "boot_time": 0,  # <--- ЗАМЕНИТЬ psutil.boot_time() НА 0
         "last_login": now,  # <--- ДОБАВИЛИ ЭТО
     }
     path = _session_path(user.fp16)
@@ -118,10 +118,10 @@ def load_saved_session(fp16: str) -> dict | None:
         return None
 
     # Проверка на перезагрузку
-    if data.get("boot_time", 0) != int(psutil.boot_time()):
-        logger.debug(f"Компьютер перезагружался: {fp16}")
-        path.unlink(missing_ok=True)
-        return None
+    # if data.get("boot_time", 0) != int(psutil.boot_time()):
+    #     logger.debug(f"Компьютер перезагружался: {fp16}")
+    #     path.unlink(missing_ok=True)
+    #     return None
 
     return data
 
