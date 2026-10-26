@@ -408,3 +408,22 @@ def get_unread_count(shared_folder: Path | str, chat_id: str, my_fp16: str) -> i
         return count
     except Exception:
         return 0
+
+
+def physically_delete_all_messages(shared_folder: Path | str, chat_id: str) -> None:
+    """Физически удаляет все файлы .bin из папки чата."""
+    from src.storage.shared_store import chat_message_dir
+    import shutil
+
+    msg_dir = chat_message_dir(shared_folder, chat_id)
+    if msg_dir.exists():
+        try:
+            shutil.rmtree(msg_dir)
+            # Папку НЕ пересоздаем здесь. Она создастся сама при отправке нового сообщения.
+            logger.info(f"Сообщения чата {chat_id} физически удалены с шары")
+        except Exception as e:
+            # Если папки нет или она уже удалена, WinError 183 или FileNotFoundError не страшны
+            if "существует" in str(e) or "cannot find" in str(e).lower():
+                pass
+            else:
+                logger.error(f"Ошибка физического удаления сообщений {chat_id}: {e}")

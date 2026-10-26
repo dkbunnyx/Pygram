@@ -200,24 +200,31 @@ def login_exists(shared_folder: Path | str, login: str) -> bool:
 
 
 def save_login_marker(
-    shared_folder: Path | str,
-    login: str,
-    fp: str,
+        shared_folder: Path | str,
+        login: str,
+        fp: str,
+        login_name: str | None = None,  # <--- НОВЫЙ ПАРАМЕТР
 ) -> None:
     """Создаёт маркер логина.
 
     Args:
         shared_folder: Корень шары.
-        login: Логин (открытым текстом — НЕ сохраняется).
+        login: Логин (открытым текстом — НЕ сохраняется в имени файла).
         fp: Fingerprint публичного ключа.
+        login_name: Опционально, сам логин для сохранения в JSON (для UI).
     """
     path = login_marker_path(shared_folder, login)
     if path.exists():
         raise FileExistsError(f"Логин уже существует: {login}")
-    write_json_atomic(path, {
+
+    data = {
         "fp": fp,
         "created_at": int(time.time() * 1000),
-    })
+    }
+    if login_name:
+        data["login"] = login_name
+
+    write_json_atomic(path, data)
     logger.debug(f"Маркер логина создан: sha256({login})")
 
 

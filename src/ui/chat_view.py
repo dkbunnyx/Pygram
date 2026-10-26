@@ -940,21 +940,25 @@ class ChatViewWidget(QWidget):
     def _clear_chat_history_all(self):
         reply = QMessageBox.question(
             self, "Удаление у всех",
-            "Удалить ВСЮ историю чата у вас и у собеседника?\nЭто действие необратимо.",
+            "Удалить ВСЮ историю чата у вас и у собеседника?\n"
+            "Это действие необратимо.\n\n"
+            "ВНИМАНИЕ: Сообщения будут ФИЗИЧЕСКИ УДАЛЕНЫ из сетевой папки!",
             QMessageBox.Yes | QMessageBox.No
         )
         if reply == QMessageBox.Yes:
             try:
-                msgs = self.db.get_messages(self.current_chat_id)
-                msg_ids = [m["msg_id"] for m in msgs]
+                from src.core.status import physically_delete_all_messages
 
-                for mid in msg_ids:
-                    if not mid.startswith("pending_"):
-                        delete_message(self.shared_folder, self.current_chat_id, mid, self.user.fp16, for_everyone=True)
+                # 1. Физически стираем папку с сообщениями из шары
+                physically_delete_all_messages(self.shared_folder, self.current_chat_id)
 
+                # 2. Очищаем локальную БД
                 self.db.delete_chat_messages(self.current_chat_id)
+
+                # 3. Очищаем UI
                 self.messages_model.clear()
-                QMessageBox.information(self, "Успех", "История удалена у всех")
+
+                QMessageBox.information(self, "Успех", "Вся история физически удалена с шары")
             except Exception as e:
                 QMessageBox.warning(self, "Ошибка", str(e))
 

@@ -300,14 +300,36 @@ def _read_single_message(shared_folder, chat_id, my_fp16, my_priv_pem, msg_file)
 # ============================================================================
 
 def sync_messages_to_db(shared_folder, chat_id, my_fp16, my_priv_pem):
-    """Синхронизирует новые сообщения из шары в локальную SQLite."""
+    """Синхронизирует новые сообщения из шары в локальную SQLite.
+    Также удаляет из локальной БД те сообщения, файлов которых больше нет на шаре.
+    """
     from src.storage.local_db import LocalDB
+    from src.storage.shared_store import chat_message_dir
+
     db = LocalDB()
 
+    # 1. Получаем список файлов, которые РЕАЛЬНО есть на шаре
+    msg_dir = chat_message_dir(shared_folder, chat_id)
+    actual_msg_ids = set()
+    if msg_dir.is_dir():
+        actual_msg_ids = {f.stem for f in msg_dir.glob("*.bin")}
+
+    # 2. Получаем то, что лежит в локальной БД
     existing_msgs = db.get_messages(chat_id)
     known_ids = {m["msg_id"] for m in existing_msgs}
 
-    new_msgs = read_new_messages(shared_folder, chat_id, my_fp16, my_priv_pem, known_ids)
+    # 3. УДАЛЕНИЕ: если сообщение есть в БД, но файла на шаре нет — удаляем из БД
+    for m in existing_msgs:
+        mid = m["msg_id"]
+        # Игнорируем временные сообщения (pending_), которые еще не отправились
+        if mid.startswith("pending_"):
+            continue
 
+        if mid not in actual_msg_ids:
+            db.delete_message(mid)
+            logger.debug(f"Сообщение {mid} удалено с шары, чистим локальную БД")
+
+    # 4. ДОБАВЛЕНИЕ: читаем новые сообщения с шары
+    new_msgs = read_new_messages(shared_folder, chat_id, my_fp16, my_priv_pem, known_ids)
     for msg in new_msgs:
         db.save_message(msg.msg_id, chat_id, msg.sender_fp16, msg.text, msg.ts)

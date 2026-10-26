@@ -16,7 +16,7 @@
 AAD для AES-GCM: f"fp={fp}|identity|v{version}" — защита от подмены.
 
 Файлы в шаре:
-    .logins/<sha256(login)>  — {fp: ..., created_at: ...}
+    .logins/<sha256(login)>  — {fp: ..., created_at: ..., login: ...}
     .keys/<fp16>.pub.pem     — публичный ключ (открыто, так и надо)
     .auth/<fp16>.auth        — Argon2id-хеш пароля
     .identities/<fp16>.enc   — приватник (Argon2id+AES-GCM)
@@ -59,10 +59,6 @@ from src.storage.shared_store import (
 )
 
 
-# ============================================================================
-# Константы формата
-# ============================================================================
-
 IDENTITY_VERSION = 1
 KDF_ALGO = "argon2id"
 KDF_TIME_COST = 3
@@ -73,23 +69,7 @@ KDF_SALT_SIZE = 16
 AAD_TEMPLATE = "fp={fp}|identity|v{version}"
 
 
-# ============================================================================
-# Генерация
-# ============================================================================
-
 def generate_identity(login: str, password: str) -> tuple[str, str]:
-    """Генерирует RSA-пару. Ничего не сохраняет.
-
-    Args:
-        login: Логин (для валидации).
-        password: Пароль (для валидации).
-
-    Returns:
-        Кортеж (priv_pem, pub_pem).
-
-    Raises:
-        ValueError: если логин/пароль пустые.
-    """
     if not login or not isinstance(login, str):
         raise ValueError("login должен быть непустой строкой")
     if not password or not isinstance(password, str):
@@ -99,35 +79,11 @@ def generate_identity(login: str, password: str) -> tuple[str, str]:
     return generate_rsa_keypair()
 
 
-# ============================================================================
-# Регистрация (сохранить всё)
-# ============================================================================
-
 def register_identity(
     shared_folder: Path | str,
     login: str,
     password: str,
 ) -> str:
-    """Регистрирует нового пользователя.
-
-    Создаёт:
-        .logins/<sha256(login)>  — маркер
-        .keys/<fp16>.pub.pem     — публичный ключ
-        .auth/<fp16>.auth        — Argon2id(пароль)
-        .identities/<fp16>.enc   — приватник (Argon2id+AES-GCM)
-
-    Args:
-        shared_folder: Корень шары.
-        login: Логин.
-        password: Пароль.
-
-    Returns:
-        fp16 (короткий fingerprint) — идентификатор пользователя в шаре.
-
-    Raises:
-        FileExistsError: если логин занят.
-        ValueError: если параметры некорректны.
-    """
     ensure_shared_structure(shared_folder)
 
     if login_exists(shared_folder, login):
@@ -137,8 +93,8 @@ def register_identity(
     fp = fingerprint(pub_pem)
     fp16 = fp[:16]
 
-    # 1) Маркер логина
-    save_login_marker(shared_folder, login, fp)
+    # 1) Маркер логина (теперь сохраняем и сам логин в открытом виде для UI)
+    save_login_marker(shared_folder, login, fp, login_name=login)
 
     # 2) Публичный ключ
     save_pub_key(shared_folder, fp, pub_pem)
@@ -159,7 +115,6 @@ def _save_encrypted_priv(
     priv_pem: str,
     password: str,
 ) -> None:
-    """Внутренняя: шифрует priv_pem и пишет в .identities/<fp16>.enc."""
     salt = generate_salt(KDF_SALT_SIZE)
     session_key = derive_key_argon2(password, salt)
 
@@ -191,29 +146,11 @@ def _save_encrypted_priv(
     save_identity_blob(shared_folder, fp, blob)
 
 
-# ============================================================================
-# Логин (загрузить, расшифровать)
-# ============================================================================
-
 def authenticate(
     shared_folder: Path | str,
     login: str,
     password: str,
 ) -> tuple[str, str]:
-    """Проверяет пароль и расшифровывает приватный ключ.
-
-    Args:
-        shared_folder: Корень шары.
-        login: Логин.
-        password: Пароль.
-
-    Returns:
-        (priv_pem, fp16).
-
-    Raises:
-        FileNotFoundError: если логина нет.
-        ValueError: если пароль неверный или файл повреждён.
-    """
     if not login_exists(shared_folder, login):
         raise FileNotFoundError(f"Логин '{login}' не найден")
 
@@ -221,7 +158,6 @@ def authenticate(
     fp = marker["fp"]
     fp16 = fp[:16]
 
-    # 1) Быстрая проверка Argon2id-хеша пароля
     try:
         stored_hash = load_auth(shared_folder, fp)
     except FileNotFoundError as e:
@@ -230,7 +166,6 @@ def authenticate(
     if not verify_password(password, stored_hash):
         raise ValueError("Неверный пароль")
 
-    # 2) Расшифровка приватника
     priv_pem = _load_encrypted_priv(shared_folder, fp, password)
 
     logger.info(f"Аутентификация успешна: {login} (fp16={fp16})")
@@ -242,7 +177,6 @@ def _load_encrypted_priv(
     fp: str,
     password: str,
 ) -> str:
-    """Внутренняя: читает .identities/<fp16>.enc и расшифровывает."""
     try:
         blob = load_identity_blob(shared_folder, fp)
     except FileNotFoundError as e:
@@ -267,7 +201,6 @@ def _load_encrypted_priv(
     except ValueError as e:
         raise ValueError("Не удалось расшифровать приватный ключ") from e
 
-    # Финальная сверка fingerprint
     priv_pem = priv_pem_bytes.decode("utf-8")
     pub_from_priv = _pub_from_priv(priv_pem)
     if fingerprint(pub_from_priv) != fp:
@@ -276,56 +209,34 @@ def _load_encrypted_priv(
     return priv_pem
 
 
-# ============================================================================
-# Смена пароля
-# ============================================================================
-
 def change_password(
     shared_folder: Path | str,
     login: str,
     old_password: str,
     new_password: str,
 ) -> None:
-    """Меняет пароль, не перегенерируя RSA-ключи.
-
-    Raises:
-        FileNotFoundError, ValueError.
-    """
     if not new_password or not isinstance(new_password, str):
         raise ValueError("new_password должен быть непустой строкой")
 
     priv_pem, fp16 = authenticate(shared_folder, login, old_password)
 
-    # Обновляем .auth
     save_auth(shared_folder, _load_fp(shared_folder, login), hash_password(new_password))
-
-    # Обновляем .identities
     _save_encrypted_priv(shared_folder, _load_fp(shared_folder, login), priv_pem, new_password)
 
     logger.info(f"Пароль изменён: {login}")
 
 
-# ============================================================================
-# Проверка / поиск
-# ============================================================================
-
 def identity_exists(shared_folder: Path | str, login: str) -> bool:
-    """Есть ли пользователь с таким логином?"""
     return login_exists(shared_folder, login)
 
 
 def get_fp16(shared_folder: Path | str, login: str) -> str | None:
-    """Возвращает fp16 для логина, или None."""
     try:
         marker = load_login_marker(shared_folder, login)
         return marker["fp"][:16]
     except (FileNotFoundError, ValueError):
         return None
 
-
-# ============================================================================
-# Помощники
-# ============================================================================
 
 def _pub_from_priv(priv_pem: str) -> str:
     key = load_private_key(priv_pem)
@@ -337,7 +248,6 @@ def _load_fp(shared_folder: Path | str, login: str) -> str:
 
 
 def _validate_container(container: dict, expected_fp: str) -> None:
-    """Проверяет структуру JSON-контейнера identity."""
     for key in ["version", "fp", "kdf", "cipher"]:
         if key not in container:
             raise ValueError(f"В файле отсутствует поле '{key}'")

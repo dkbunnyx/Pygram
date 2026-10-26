@@ -15,7 +15,6 @@ from src.core.chat_logic import (
     get_group_display_name,
 )
 from src.storage.local_db import LocalDB
-from src.core.crypto import unwrap_key, aes_decrypt, from_base64
 from src.storage.shared_store import load_chat_keys, load_chat_meta_enc
 from src.os_integration.notifications import show_notification
 
@@ -38,8 +37,28 @@ class ChatListWidget(QWidget):
 
         self.current_open_chat_id: str | None = None
 
+        # СИНХРОНИЗАЦИЯ ЛОГИНОВ ПРИ ЗАПУСКЕ
+        self._sync_user_logins()
+
         self._setup_ui()
         self.refresh_chats()
+
+    def _sync_user_logins(self):
+        """Сканирует маркеры логинов в шаре и обновляет локальную БД."""
+        logins_dir = Path(self.shared_folder) / ".logins"
+        if not logins_dir.exists():
+            return
+
+        for marker_file in logins_dir.glob("*"):
+            try:
+                data = json.loads(marker_file.read_text(encoding="utf-8"))
+                fp = data.get("fp")
+                login = data.get("login")
+                if fp and login:
+                    fp16 = fp[:16]
+                    self.db.save_user_map(fp16, login)
+            except Exception:
+                pass
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -61,7 +80,6 @@ class ChatListWidget(QWidget):
         self.list_widget.itemClicked.connect(self._on_item_clicked)
         layout.addWidget(self.list_widget)
 
-    # П.7: общий хелпер вместо локального _get_group_name
     def _group_name_or_default(self, chat_id: str) -> str:
         return get_group_display_name(
             self.shared_folder, chat_id, self.user_fp16, self.user_priv_pem,
@@ -136,7 +154,6 @@ class ChatListWidget(QWidget):
                 display_name = "Личный чат"
 
         elif chat_type == "group":
-            # П.7: единый get_group_display_name
             display_name = self._group_name_or_default(chat_id)
 
             avatar_path = self.profile_dir / f"{chat_id}.png"
