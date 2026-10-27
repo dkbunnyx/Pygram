@@ -28,7 +28,6 @@ __pycache__/
 # Сборки
 build/
 dist/
-*.spec
 
 # Логи
 *.log
@@ -49,6 +48,8 @@ _thumbs/
 # Временные
 *.bak
 *.tmp
+all_code.txt
+collect_code.py
 
 # ОС
 .DS_Store
