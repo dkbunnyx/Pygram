@@ -134,7 +134,11 @@ class SyncWorker(QThread):
 
     def run(self):
         try:
-            sync_messages_to_db(self.shared_folder, self.chat_id, self.user_fp16, self.user_priv_pem)
+            sync_messages_to_db(
+                self.shared_folder, self.chat_id,
+                self.user_fp16, self.user_priv_pem,
+                prune_missing=False,  # ← НЕ True
+            )
             self.finished.emit()
         except Exception as e:
             logger.error(f"Ошибка синхронизации: {e}")
@@ -581,8 +585,14 @@ class ChatViewWidget(QWidget):
         self.delegate.show_header = (chat_type != "dm")
         self.delegate.profile_dir = profile_dir
         self.delegate.db = self.db
-        self.delegate.my_msg_bg = self.db.get_setting("color_my_msg", "#4a90e2")
-        self.delegate.other_msg_bg = self.db.get_setting("color_other_msg", "#e2a04a")
+        # Проверяем, какая тема выбрана
+        current_theme = self.db.get_setting("theme", "base")
+        if current_theme == "custom":
+            self.delegate.my_msg_bg = self.db.get_setting("color_my_msg", "#4a90e2")
+            self.delegate.other_msg_bg = self.db.get_setting("color_other_msg", "#e2a04a")
+        else:
+            self.delegate.my_msg_bg = "#4a90e2"
+            self.delegate.other_msg_bg = "#e2a04a"
         self.delegate.chat_files_dir = chat_files_dir(self.shared_folder, chat_id)
 
         self.messages_view.setItemDelegate(self.delegate)

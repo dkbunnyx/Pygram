@@ -82,7 +82,7 @@ class SettingsView(QWidget):
         emoji_row.addStretch()
         f_layout.addLayout(emoji_row)
 
-        f_layout.addWidget(QLabel("Быстрая реакция (ЛКМ по сообщению):"))
+        f_layout.addWidget(QLabel("Быстрая реакция (ПКМ по сообщению):"))
         quick_row = QHBoxLayout()
         self.btn_quick_reaction = QPushButton("❤️")
         self.btn_quick_reaction.setFixedSize(50, 40)
@@ -115,11 +115,13 @@ class SettingsView(QWidget):
         bg_image_layout.addWidget(self.btn_clear_bg_image)
         c_main_layout.addLayout(bg_image_layout)
 
-        self._add_separator(c_main_layout, "Цвета интерфейса")
-
+        # --- НОВЫЙ БЛОК: Всё, что касается цветов, убираем ВНУТРЬ colors_widget ---
         self.colors_widget = QWidget()
         c_layout = QVBoxLayout(self.colors_widget)
         c_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Переносим сюда заголовок "Цвета интерфейса"
+        self._add_separator(c_layout, "Цвета интерфейса")
 
         c_layout.addWidget(QLabel("<b>Фоны</b>"))
         self.btn_bg = QPushButton("Цвет фона приложения")
@@ -361,6 +363,19 @@ class SettingsView(QWidget):
 
         theme_str = "custom" if "Пользовательская" in self.combo_theme.currentText() else "base"
         db.set_setting("theme", theme_str)
+
+        # --- НОВОЕ: если выбрана основная тема, сбрасываем цвета в БД на дефолтные ---
+        if theme_str == "base":
+            db.set_setting("color_my_msg", "#4a90e2")
+            db.set_setting("color_other_msg", "#e2a04a")
+            db.set_setting("color_bg", "#1a1a2e")
+            db.set_setting("color_sidebar_bg", "#1a1a1a")
+            db.set_setting("color_chat_list_bg", "#1a1a2e")
+            db.set_setting("color_chat_bg", "#1a1a2e")
+            db.set_setting("color_text", "#cdd6f4")
+            db.set_setting("color_btn_bg", "#252538")
+            db.set_setting("color_input_bg", "#252538")
+        # -----------------------------------------------------------------------------
 
         db.set_setting("hide_last_seen", "1" if self.chk_hide_last_seen.isChecked() else "0")
         db.set_setting("download_dir", self.input_download_dir.text())

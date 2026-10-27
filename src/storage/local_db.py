@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 import threading
 from pathlib import Path
 
@@ -38,6 +39,7 @@ class LocalDB:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=5000")  # ← ждать до 5 сек
             self._local.conn = conn
         return self._local.conn
 
@@ -104,13 +106,21 @@ class LocalDB:
             self._local.conn.close()
             self._local.conn = None
 
-    def save_message(self, msg_id: str, chat_id: str, sender_fp16: str, text: str, ts: int):
+    def save_message(self, msg_id: str, chat_id: str, sender_fp16: str, text: str, ts: int, retries: int = 3):
         conn = self._get_conn()
-        conn.execute(
-            "INSERT OR REPLACE INTO messages (msg_id, chat_id, sender_fp16, text, ts) VALUES (?, ?, ?, ?, ?)",
-            (msg_id, chat_id, sender_fp16, text, ts)
-        )
-        conn.commit()
+        for attempt in range(retries):
+            try:
+                conn.execute(
+                    "INSERT OR REPLACE INTO messages (msg_id, chat_id, sender_fp16, text, ts) VALUES (?, ?, ?, ?, ?)",
+                    (msg_id, chat_id, sender_fp16, text, ts)
+                )
+                conn.commit()
+                return
+            except sqlite3.OperationalError as e:
+                if "locked" in str(e).lower() and attempt < retries - 1:
+                    time.sleep(0.1 * (attempt + 1))
+                    continue
+                raise
 
     def delete_message(self, msg_id: str):
         conn = self._get_conn()

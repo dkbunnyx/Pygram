@@ -73,8 +73,16 @@ class MainWindow(QMainWindow):
         self._on_settings_saved()
 
         self.notification_timer = QTimer(self)
-        self.notification_timer.timeout.connect(self.chat_list.refresh_chats)
+        self.notification_timer.timeout.connect(self._tick)
         self.notification_timer.start(3000)
+
+    def _tick(self):
+        """Периодический тик: фоновая синхронизация всех чатов."""
+        try:
+            self.chat_list.sync_all_chats()
+        except Exception as e:
+            from loguru import logger
+            logger.error(f"_tick: ошибка синхронизации: {e}")
 
     def _on_chat_selected(self, chat_id: str):
         # 1. Помечаем сообщения прочитанными ТОЛЬКО в локальной БД —
@@ -464,13 +472,11 @@ class MainWindow(QMainWindow):
         set_online(self.config.shared_folder, self.user.fp16, True, hide_last_seen=hide_last_seen)
         self._setup_sidebar()
 
-        self.chat_list.user_fp16 = user.fp16
-        self.chat_list.user_login = user.login
-        self.chat_list.user_priv_pem = user.priv_pem
-        self.chat_list.refresh_chats()
+        # ← вместо прямых присваиваний:
+        self.chat_list.set_user(user.fp16, user.login, user.priv_pem)
 
         self.chat_view.user = user
-        self.chat_view.messages_model.clear()  # ← ИСПРАВЛЕНО
+        self.chat_view.messages_model.clear()
         self.chat_view.input_widget.setVisible(False)
         self.chat_view.label_title.setText("Выберите чат")
         self.chat_view.label_status.setText("")
@@ -533,11 +539,9 @@ class MainWindow(QMainWindow):
             for btn in self.chat_list.findChildren(QPushButton):
                 btn.setStyleSheet(f"QPushButton {{ background-color: {btn_bg}; color: {text_color}; border: 1px solid #313148; border-radius: 8px; padding: 10px; }} QPushButton:hover {{ background-color: #313148; }}")
 
-            self.chat_view.delegate.my_msg_bg = my_msg_bg  # ← ИСПРАВЛЕНО
-            self.chat_view.delegate.other_msg_bg = other_msg_bg  # ← ИСПРАВЛЕНО
+            self.chat_view.delegate.my_msg_bg = my_msg_bg
+            self.chat_view.delegate.other_msg_bg = other_msg_bg
 
-            if self.chat_view.current_chat_id:
-                self.chat_view.load_chat(self.chat_view.current_chat_id)
         else:
             from src.ui.theme import load_theme
             load_theme(QApplication.instance(), "base")
@@ -547,11 +551,17 @@ class MainWindow(QMainWindow):
             for btn in self.chat_list.findChildren(QPushButton):
                 btn.setStyleSheet("")
 
-            self.chat_view.delegate.my_msg_bg = "#4a90e2"  # ← ИСПРАВЛЕНО
-            self.chat_view.delegate.other_msg_bg = "#e2a04a"  # ← ИСПРАВЛЕНО
+            self.chat_view.delegate.my_msg_bg = "#4a90e2"
+            self.chat_view.delegate.other_msg_bg = "#e2a04a"
 
-            if self.chat_view.current_chat_id:
-                self.chat_view.load_chat(self.chat_view.current_chat_id)
+        # --- ГЛАВНЫЙ ФИКС БАГА №2 ---
+        # Принудительно обновляем делегат, чтобы цвета сообщений применились мгновенно
+        if self.chat_view.messages_model.messages:
+            top_left = self.chat_view.messages_model.index(0, 0)
+            bottom_right = self.chat_view.messages_model.index(
+                len(self.chat_view.messages_model.messages) - 1, 0
+            )
+            self.chat_view.messages_model.dataChanged.emit(top_left, bottom_right, [Qt.UserRole])
 
         self.chat_view._apply_chat_background()
         if self.chat_view.current_chat_id:

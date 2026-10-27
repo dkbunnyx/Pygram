@@ -2,11 +2,13 @@
 
 from pathlib import Path
 import json
+import os
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QListWidget,
     QListWidgetItem, QPushButton, QInputDialog, QMessageBox
 )
-from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtCore import Qt, Signal, QSize, QThread
 from PySide6.QtGui import QColor, QIcon, QPixmap
 from loguru import logger
 
@@ -14,9 +16,54 @@ from src.core.chat_logic import (
     list_user_chats, create_dm_chat, list_all_chats, create_group_chat,
     get_group_display_name,
 )
+from src.core.message import sync_messages_to_db
 from src.storage.local_db import LocalDB
 from src.storage.shared_store import load_chat_keys, load_chat_meta_enc
 from src.os_integration.notifications import show_notification
+
+
+class SyncAllWorker(QThread):
+    """Фоновая синхронизация ВСЕХ чатов пользователя в локальную БД.
+
+    Нужна для того, чтобы уведомления работали даже для чатов,
+    которые сейчас НЕ открыты в ChatViewWidget.
+
+    Раньше sync_messages_to_db вызывалась только для текущего
+    открытого чата — из-за этого новые сообщения в других чатах
+    не попадали в локальную БД, и get_unread_count() возвращал 0.
+    """
+
+    finished = Signal()
+
+    def __init__(self, shared_folder, user_fp16: str, user_priv_pem: str, parent=None):
+        super().__init__(parent)
+        self.shared_folder = shared_folder
+        self.user_fp16 = user_fp16
+        self.user_priv_pem = user_priv_pem
+
+    def run(self):
+        try:
+            chats = list_user_chats(self.shared_folder, self.user_fp16)
+            logger.debug(
+                f"[pid={os.getpid()}] SyncAllWorker: {len(chats)} чатов "
+                f"для fp16={self.user_fp16}"
+            )
+            for chat in chats:
+                chat_id = chat["chat_id"]
+                try:
+                    sync_messages_to_db(
+                        self.shared_folder,
+                        chat_id,
+                        self.user_fp16,
+                        self.user_priv_pem,
+                        prune_missing=False,  # ← НЕ удаляем чужие записи
+                    )
+                except Exception as e:
+                    logger.warning(f"SyncAllWorker: ошибка синхронизации {chat_id}: {e}")
+        except Exception as e:
+            logger.error(f"SyncAllWorker: критическая ошибка: {e}")
+        finally:
+            self.finished.emit()
 
 
 class ChatListWidget(QWidget):
@@ -24,7 +71,15 @@ class ChatListWidget(QWidget):
 
     chat_selected = Signal(str)
 
-    def __init__(self, shared_folder: str | Path, user_fp16: str, user_login: str, user_priv_pem: str = "", user_is_admin: bool = False, parent=None):
+    def __init__(
+        self,
+        shared_folder: str | Path,
+        user_fp16: str,
+        user_login: str,
+        user_priv_pem: str = "",
+        user_is_admin: bool = False,
+        parent=None,
+    ):
         super().__init__(parent)
         self.shared_folder = shared_folder
         self.user_fp16 = user_fp16
@@ -32,18 +87,82 @@ class ChatListWidget(QWidget):
         self.user_priv_pem = user_priv_pem
         self.user_is_admin = user_is_admin
         self.profile_dir = Path(shared_folder) / ".profiles"
-        self._last_unread = {}
+        self._last_unread: dict[str, int] = {}
         self.db = LocalDB()
 
         self.current_open_chat_id: str | None = None
+
+        # Воркер фоновой синхронизации всех чатов
+        self._sync_all_worker: SyncAllWorker | None = None
+        # Флаг: идёт ли сейчас синхронизация (чтобы не дёргать уведомления
+        # на неполных данных)
+        self._sync_in_progress: bool = False
 
         # СИНХРОНИЗАЦИЯ ЛОГИНОВ ПРИ ЗАПУСКЕ
         self._sync_user_logins()
 
         self._setup_ui()
+        self._sync_in_progress = True  # ← на время первой синхронизации
+        self.refresh_chats()  # ← отрисует чаты, но не будет проверять уведомления
+        self.sync_all_chats()  # ← в _on_sync_all_finished сбросит флаг и вызовет refresh_chats
+
+    # ========================================================================
+    # СМЕНА ПОЛЬЗОВАТЕЛЯ
+    # ========================================================================
+
+    def set_user(self, user_fp16: str, user_login: str, user_priv_pem: str) -> None:
+        """Корректно переключает виджет на другого пользователя.
+
+        Сбрасывает _last_unread (иначе старые счётчики от предыдущего
+        аккаунта ломают логику уведомлений) и current_open_chat_id.
+        """
+        logger.info(
+            f"[pid={os.getpid()}] ChatList.set_user: "
+            f"{self.user_login} -> {user_login} (fp16={user_fp16})"
+        )
+        self.user_fp16 = user_fp16
+        self.user_login = user_login
+        self.user_priv_pem = user_priv_pem
+        self._last_unread.clear()
+        self.current_open_chat_id = None
+        self._sync_user_logins()
+        self.refresh_chats()
+        self.sync_all_chats()
+
+    # ========================================================================
+    # СИНХРОНИЗАЦИЯ ВСЕХ ЧАТОВ
+    # ========================================================================
+
+    def sync_all_chats(self) -> None:
+        """Запускает фоновую синхронизацию всех чатов пользователя.
+
+        Если синхронизация уже идёт — второй запуск игнорируется.
+        """
+        if self._sync_all_worker and self._sync_all_worker.isRunning():
+            logger.debug(f"[pid={os.getpid()}] sync_all_chats: уже идёт, пропуск")
+            return
+
+        self._sync_in_progress = True
+        self._sync_all_worker = SyncAllWorker(
+            self.shared_folder,
+            self.user_fp16,
+            self.user_priv_pem,
+        )
+        self._sync_all_worker.finished.connect(self._on_sync_all_finished)
+        self._sync_all_worker.start()
+
+    def _on_sync_all_finished(self) -> None:
+        self._sync_in_progress = False
+        if self._sync_all_worker:
+            self._sync_all_worker.deleteLater()
+            self._sync_all_worker = None
         self.refresh_chats()
 
-    def _sync_user_logins(self):
+    # ========================================================================
+    # СИНХРОНИЗАЦИЯ ЛОГИНОВ
+    # ========================================================================
+
+    def _sync_user_logins(self) -> None:
         """Сканирует маркеры логинов в шаре и обновляет локальную БД."""
         logins_dir = Path(self.shared_folder) / ".logins"
         if not logins_dir.exists():
@@ -59,6 +178,10 @@ class ChatListWidget(QWidget):
                     self.db.save_user_map(fp16, login)
             except Exception:
                 pass
+
+    # ========================================================================
+    # UI
+    # ========================================================================
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -86,6 +209,10 @@ class ChatListWidget(QWidget):
             default=f"Группа {chat_id[4:12]}",
         ) or f"Группа {chat_id[4:12]}"
 
+    # ========================================================================
+    # ОБНОВЛЕНИЕ СПИСКА
+    # ========================================================================
+
     def refresh_chats(self):
         self.list_widget.clear()
         try:
@@ -102,7 +229,11 @@ class ChatListWidget(QWidget):
             else:
                 for chat in chats:
                     self._add_chat_item(chat, show_unread=True)
-                self._check_new_messages(chats)
+
+                # Проверяем уведомления только если синхронизация завершена —
+                # иначе на неполных данных можно пропустить или задвоить уведомление
+                if not self._sync_in_progress:
+                    self._check_new_messages(chats)
 
                 if not self.current_open_chat_id:
                     first_chat_id = chats[0]["chat_id"]
@@ -187,12 +318,25 @@ class ChatListWidget(QWidget):
         item.setData(Qt.UserRole, chat_id)
         self.list_widget.addItem(item)
 
+    # ========================================================================
+    # УВЕДОМЛЕНИЯ
+    # ========================================================================
+
     def _check_new_messages(self, chats: list[dict]):
         for chat in chats:
             chat_id = chat["chat_id"]
             unread = self.db.get_unread_count(chat_id, self.user_fp16)
 
             old_count = self._last_unread.get(chat_id, 0)
+
+            # Диагностический лог — видно, почему не срабатывает уведомление
+            if unread != old_count:
+                logger.info(
+                    f"[pid={os.getpid()}] [{self.user_login}] "
+                    f"chat={chat_id} unread={unread} old={old_count} "
+                    f"db={self.db.path}"
+                )
+
             if unread > old_count:
                 if chat_id == self.current_open_chat_id:
                     self._last_unread[chat_id] = unread
@@ -216,12 +360,17 @@ class ChatListWidget(QWidget):
                 else:
                     title = chat_id
 
+                logger.info(f"ВЫЗОВ УВЕДОМЛЕНИЯ: {title} - {unread} новых")
                 show_notification(
                     title=title,
                     message=f"Новых сообщений: {unread}",
                 )
 
             self._last_unread[chat_id] = unread
+
+    # ========================================================================
+    # ОБРАБОТЧИКИ
+    # ========================================================================
 
     def _on_item_clicked(self, item: QListWidgetItem):
         chat_id = item.data(Qt.UserRole)

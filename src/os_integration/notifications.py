@@ -5,19 +5,12 @@ from loguru import logger
 try:
     from plyer import notification
     PLYER_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     PLYER_AVAILABLE = False
-    logger.warning("plyer не установлен, уведомления отключены")
+    logger.error(f"plyer не установлен: {e}")
 
 
 def show_notification(title: str, message: str, timeout: int = 5):
-    """Показывает системное уведомление Windows.
-
-    Args:
-        title: Заголовок уведомления.
-        message: Текст уведомления.
-        timeout: Время показа в секундах.
-    """
     if not PLYER_AVAILABLE:
         return
 
@@ -25,7 +18,8 @@ def show_notification(title: str, message: str, timeout: int = 5):
         notification.notify(
             title=title,
             message=message,
-            app_name="Pygram",
+            app_name="Pygram",  # <--- ВОТ ОНО, НАЗВАНИЕ ПРИЛОЖЕНИЯ
+            app_icon=None,      # Сюда можно потом закинуть путь к .ico
             timeout=timeout,
         )
     except Exception as e:
