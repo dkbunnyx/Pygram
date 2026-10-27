@@ -11,9 +11,6 @@ from dotenv.main import load_dotenv
 
 from src.constants import get_app_dir
 
-# Сетевой путь по умолчанию (для колледжа)
-DEFAULT_SHARED_FOLDER = r"\\Server\Share\Pygram"  # ЗАМЕНИТЬ НА ПУТЬ СЕТЕВОЙ ПАПКИ
-
 @dataclass
 class Config:
     shared_folder: str
@@ -53,15 +50,10 @@ def _env_path() -> Path:
     return get_app_dir() / ".env"
 
 
-def ensure_config(shared_folder: str | None = None) -> Path:
-    """Создает .env с дефолтными настройками."""
+def ensure_config(shared_folder: str) -> Path:  # убрали "| None = None"
     env_path = _env_path()
     if env_path.exists():
         return env_path
-
-    # Если путь не передан, берем дефолтный сетевой
-    if shared_folder is None:
-        shared_folder = DEFAULT_SHARED_FOLDER
 
     backup_folder = str(get_app_dir() / "backups")
     content = (

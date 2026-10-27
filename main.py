@@ -2,8 +2,6 @@
 
 import sys
 from pathlib import Path
-import sys
-from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
@@ -46,10 +44,13 @@ def main():
     if not shared_path.is_dir():
         try:
             shared_path.mkdir(parents=True, exist_ok=True)
-        except Exception:
+            # Логируем, что папка создана
+            from loguru import logger
+            logger.warning(f"Папка шары не существовала, создана: {shared_path}")
+        except Exception as e:
             QMessageBox.critical(
                 None, "Ошибка",
-                f"Не удалось создать папку шары:\n{shared_path}",
+                f"Не удалось создать папку шары:\n{shared_path}\n\n{e}",
             )
             sys.exit(1)
 
