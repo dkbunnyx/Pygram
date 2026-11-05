@@ -35,6 +35,10 @@ from src.core.crypto import (
     # Hybrid
     wrap_key_for_recipients, unwrap_key,
     hybrid_encrypt, hybrid_decrypt,
+    encrypt_file_stream,
+    decrypt_file_stream,
+    wrap_file_key_for_group,
+    unwrap_file_key_for_group,
 )
 
 
@@ -606,3 +610,129 @@ class TestEdgeCases:
         _, pub = rsa_keypair
         with pytest.raises(ValueError):
             wrap_key_for_recipients(b"short", {"a": pub})
+class TestFileEncryption:
+
+    def test_file_round_trip(self, tmp_path):
+        source = tmp_path / "original.bin"
+        encrypted = tmp_path / "encrypted.bin"
+        decrypted = tmp_path / "decrypted.bin"
+
+        original_data = b"Pygram test data " * 300_000
+        source.write_bytes(original_data)
+
+        aad = b"pygram-file-v1|test-chat|test-file"
+
+        key, nonce, tag, size = encrypt_file_stream(
+            source,
+            encrypted,
+            aad,
+            chunk_size=64 * 1024,
+        )
+
+        assert size == len(original_data)
+        assert encrypted.read_bytes() != original_data
+
+        decrypted_size = decrypt_file_stream(
+            encrypted,
+            decrypted,
+            key,
+            nonce,
+            tag,
+            aad,
+            chunk_size=64 * 1024,
+        )
+
+        assert decrypted_size == len(original_data)
+        assert decrypted.read_bytes() == original_data
+
+    def test_wrong_key_rejected(self, tmp_path):
+        source = tmp_path / "original.bin"
+        encrypted = tmp_path / "encrypted.bin"
+        decrypted = tmp_path / "decrypted.bin"
+
+        source.write_bytes(b"secret data")
+        aad = b"test-aad"
+
+        key, nonce, tag, _ = encrypt_file_stream(
+            source, encrypted, aad
+        )
+
+        wrong_key = generate_aes_key()
+
+        with pytest.raises(ValueError):
+            decrypt_file_stream(
+                encrypted,
+                decrypted,
+                wrong_key,
+                nonce,
+                tag,
+                aad,
+            )
+
+        assert not decrypted.exists()
+
+    def test_tampered_file_rejected(self, tmp_path):
+        source = tmp_path / "original.bin"
+        encrypted = tmp_path / "encrypted.bin"
+        decrypted = tmp_path / "decrypted.bin"
+
+        source.write_bytes(b"secret data" * 100)
+        aad = b"test-aad"
+
+        key, nonce, tag, _ = encrypt_file_stream(
+            source, encrypted, aad
+        )
+
+        data = bytearray(encrypted.read_bytes())
+        data[0] ^= 1
+        encrypted.write_bytes(data)
+
+        with pytest.raises(ValueError):
+            decrypt_file_stream(
+                encrypted,
+                decrypted,
+                key,
+                nonce,
+                tag,
+                aad,
+            )
+
+        assert not decrypted.exists()
+
+    def test_group_key_wrap_round_trip(self):
+        file_key = generate_aes_key()
+        group_key = generate_aes_key()
+        aad = b"pygram-file-key-v1|test"
+
+        package = wrap_file_key_for_group(
+            file_key,
+            group_key,
+            aad,
+        )
+
+        restored_key = unwrap_file_key_for_group(
+            package,
+            group_key,
+            aad,
+        )
+
+        assert restored_key == file_key
+
+    def test_wrong_group_key_rejected(self):
+        file_key = generate_aes_key()
+        group_key = generate_aes_key()
+        wrong_group_key = generate_aes_key()
+        aad = b"pygram-file-key-v1|test"
+
+        package = wrap_file_key_for_group(
+            file_key,
+            group_key,
+            aad,
+        )
+
+        with pytest.raises(ValueError):
+            unwrap_file_key_for_group(
+                package,
+                wrong_group_key,
+                aad,
+            )

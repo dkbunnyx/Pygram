@@ -6,30 +6,63 @@ import os
 import shutil
 from datetime import datetime
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QDialog,
-    QListView, QListWidget, QListWidgetItem, QLineEdit, QPushButton,
-    QLabel, QFileDialog, QMessageBox, QMenu, QAbstractItemView,
-    QProgressBar
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QDialog,
+    QListView,
+    QListWidget,
+    QListWidgetItem,
+    QLineEdit,
+    QPushButton,
+    QLabel,
+    QFileDialog,
+    QMessageBox,
+    QMenu,
+    QAbstractItemView,
+    QProgressBar,
 )
-from PySide6.QtCore import Qt, QEvent, QTimer, QThread, Signal, QAbstractListModel, QModelIndex, QPoint
+from PySide6.QtCore import (
+    Qt,
+    QEvent,
+    QTimer,
+    QThread,
+    Signal,
+    QAbstractListModel,
+    QModelIndex,
+    QPoint,
+)
 from PySide6.QtGui import QKeySequence, QPixmap, QGuiApplication, QPainter
 from loguru import logger
 import tempfile
 import time
 
 from src.core.message import (
-    send_message, send_file, sync_messages_to_db
+    send_message,
+    send_file,
+    sync_messages_to_db,
+    decrypt_attachment_to_bytes,
 )
 from src.core.chat_logic import get_chat_meta, delete_group_chat, get_group_display_name
 from src.core.crypto import unwrap_key, aes_decrypt, from_base64
 from src.core.admin import can_read_all_chats
 from src.storage.local_db import LocalDB
 from src.storage.shared_store import (
-    chat_files_dir, chat_message_dir, load_chat_keys, load_chat_meta_enc,
+    chat_files_dir,
+    chat_message_dir,
+    load_chat_keys,
+    load_chat_meta_enc,
 )
 from src.core.status import (
-    get_status, set_typing, mark_messages_read, get_read_messages,
-    set_reaction, get_reactions, delete_message, get_deleted_messages, DIR_STATUS
+    get_status,
+    set_typing,
+    mark_messages_read,
+    get_read_messages,
+    set_reaction,
+    get_reactions,
+    delete_message,
+    get_deleted_messages,
+    DIR_STATUS,
 )
 from src.ui.widgets.emoji_picker import EmojiPicker
 from src.ui.widgets.message_delegate import MessageDelegate
@@ -54,7 +87,7 @@ class ResizableListView(QListView):
             scaled = self.bg_pixmap.scaled(
                 self.viewport().size(),
                 Qt.KeepAspectRatioByExpanding,
-                Qt.SmoothTransformation
+                Qt.SmoothTransformation,
             )
             x = (self.viewport().width() - scaled.width()) // 2
             y = (self.viewport().height() - scaled.height()) // 2
@@ -135,8 +168,10 @@ class SyncWorker(QThread):
     def run(self):
         try:
             sync_messages_to_db(
-                self.shared_folder, self.chat_id,
-                self.user_fp16, self.user_priv_pem,
+                self.shared_folder,
+                self.chat_id,
+                self.user_fp16,
+                self.user_priv_pem,
                 prune_missing=False,  # ← НЕ True
             )
             self.finished.emit()
@@ -158,8 +193,20 @@ class SendWorker(QThread):
 
     def run(self):
         try:
-            real_id = send_message(self.shared_folder, self.chat_id, self.user_fp16, self.user_priv_pem, self.text)
-            self.db.save_message(real_id, self.chat_id, self.user_fp16, self.text, int(time.time() * 1000))
+            real_id = send_message(
+                self.shared_folder,
+                self.chat_id,
+                self.user_fp16,
+                self.user_priv_pem,
+                self.text,
+            )
+            self.db.save_message(
+                real_id,
+                self.chat_id,
+                self.user_fp16,
+                self.text,
+                int(time.time() * 1000),
+            )
             self.finished.emit(True, real_id)
         except Exception as e:
             logger.error(f"Ошибка отправки: {e}")
@@ -187,12 +234,21 @@ class DeleteWorker(QThread):
                     continue
 
                 # Сначала пытаемся физически удалить файл
-                physically_delete_single_message(self.shared_folder, self.chat_id, msg_id)
+                physically_delete_single_message(
+                    self.shared_folder, self.chat_id, msg_id
+                )
 
                 # Если это НЕ "удалить у всех", то еще и скрываем в статусах (на всякий случай)
                 if not self.for_everyone:
                     from src.core.status import delete_message
-                    delete_message(self.shared_folder, self.chat_id, msg_id, self.user_fp16, for_everyone=False)
+
+                    delete_message(
+                        self.shared_folder,
+                        self.chat_id,
+                        msg_id,
+                        self.user_fp16,
+                        for_everyone=False,
+                    )
 
         except Exception as e:
             logger.error(f"Ошибка фонового удаления: {e}")
@@ -202,6 +258,7 @@ class DeleteWorker(QThread):
 
 class DownloadWorker(QThread):
     """Поток для скачивания файла с обновлением прогресса."""
+
     progress = Signal(int, int, int)  # (процент, скачано_байт, всего_байт)
     finished = Signal(bool, str)
 
@@ -234,6 +291,50 @@ class DownloadWorker(QThread):
             self.finished.emit(False, str(e))
 
 
+class AttachmentPreviewWorker(QThread):
+    """Фоновая расшифровка изображения для превью."""
+
+    preview_ready = Signal(str, bytes)
+    preview_failed = Signal(str, str)
+
+    def __init__(
+        self,
+        shared_folder,
+        chat_id,
+        user_fp16,
+        user_priv_pem,
+        msg_id,
+        sender_fp16,
+        attachment_data,
+    ):
+        super().__init__()
+
+        self.shared_folder = shared_folder
+        self.chat_id = chat_id
+        self.user_fp16 = user_fp16
+        self.user_priv_pem = user_priv_pem
+        self.msg_id = msg_id
+        self.sender_fp16 = sender_fp16
+        self.attachment_data = attachment_data
+
+    def run(self):
+        try:
+            image_data = decrypt_attachment_to_bytes(
+                self.shared_folder,
+                self.chat_id,
+                self.user_fp16,
+                self.user_priv_pem,
+                self.sender_fp16,
+                self.attachment_data,
+            )
+
+            self.preview_ready.emit(self.msg_id, image_data)
+
+        except Exception as e:
+            logger.error(f"Не удалось расшифровать превью {self.msg_id}: {e}")
+            self.preview_failed.emit(self.msg_id, str(e))
+
+
 class ImageConfirmDialog(QDialog):
     def __init__(self, image, parent=None):
         super().__init__(parent)
@@ -252,7 +353,9 @@ class ImageConfirmDialog(QDialog):
         btn_layout.addWidget(btn_cancel)
         btn_layout.addStretch()
         btn_send = QPushButton("Отправить")
-        btn_send.setStyleSheet("background-color: #4a90e2; color: white; font-weight: bold;")
+        btn_send.setStyleSheet(
+            "background-color: #4a90e2; color: white; font-weight: bold;"
+        )
         btn_send.clicked.connect(self.accept)
         btn_layout.addWidget(btn_send)
         layout.addLayout(btn_layout)
@@ -317,6 +420,9 @@ class ChatViewWidget(QWidget):
 
         self._setup_ui()
         self._apply_chat_background()
+        self.delegate.attachment_preview_requested.connect(
+            self._on_attachment_preview_requested
+        )
 
         self.emoji_picker = EmojiPicker()
         self.emoji_picker.emoji_selected.connect(self._insert_emoji)
@@ -392,7 +498,9 @@ class ChatViewWidget(QWidget):
 
         self.btn_chat_menu = QPushButton("⋮")
         self.btn_chat_menu.setFixedSize(30, 30)
-        self.btn_chat_menu.setStyleSheet("font-size: 20px; font-weight: bold; background: transparent; border: none;")
+        self.btn_chat_menu.setStyleSheet(
+            "font-size: 20px; font-weight: bold; background: transparent; border: none;"
+        )
         self.btn_chat_menu.setCursor(Qt.PointingHandCursor)
         self.btn_chat_menu.clicked.connect(self._on_chat_menu_clicked)
         header_layout.addWidget(self.btn_chat_menu)
@@ -408,7 +516,9 @@ class ChatViewWidget(QWidget):
         self.messages_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         self.messages_view.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.messages_view.customContextMenuRequested.connect(self._on_message_context_menu)
+        self.messages_view.customContextMenuRequested.connect(
+            self._on_message_context_menu
+        )
 
         self.messages_view.clicked.connect(self._on_message_left_click)
 
@@ -420,7 +530,9 @@ class ChatViewWidget(QWidget):
         layout.addWidget(self.messages_view)
 
         self.selection_bar = QWidget()
-        self.selection_bar.setStyleSheet("background-color: #313148; border-radius: 8px;")
+        self.selection_bar.setStyleSheet(
+            "background-color: #313148; border-radius: 8px;"
+        )
         self.selection_bar.setFixedHeight(50)
         sel_layout = QHBoxLayout(self.selection_bar)
         sel_layout.setContentsMargins(10, 5, 10, 5)
@@ -429,7 +541,9 @@ class ChatViewWidget(QWidget):
         sel_layout.addWidget(self.lbl_selected)
         sel_layout.addStretch()
         btn_delete = QPushButton("Удалить выбранные")
-        btn_delete.setStyleSheet("background-color: #f38ba8; color: white; font-weight: bold;")
+        btn_delete.setStyleSheet(
+            "background-color: #f38ba8; color: white; font-weight: bold;"
+        )
         btn_delete.clicked.connect(self._delete_selected_messages)
         sel_layout.addWidget(btn_delete)
         btn_cancel = QPushButton("Отмена")
@@ -472,16 +586,22 @@ class ChatViewWidget(QWidget):
     def _apply_chat_background(self):
         bg_image_path = self.db.get_setting("chat_bg_image", "")
         if bg_image_path and os.path.exists(bg_image_path):
-            self.messages_view.setStyleSheet("background-color: transparent; border: none;")
+            self.messages_view.setStyleSheet(
+                "background-color: transparent; border: none;"
+            )
             self.messages_view.set_background_image(bg_image_path)
         else:
             self.messages_view.set_background_image("")
-            self.messages_view.setStyleSheet("background-color: transparent; border: none;")
+            self.messages_view.setStyleSheet(
+                "background-color: transparent; border: none;"
+            )
 
     def eventFilter(self, obj, event):
         if obj is self.input_field and event.type() == QEvent.KeyPress:
             if self.current_chat_id and self.current_other_fp:
-                set_typing(self.shared_folder, self.user.fp16, self.current_chat_id, True)
+                set_typing(
+                    self.shared_folder, self.user.fp16, self.current_chat_id, True
+                )
                 self.typing_timer.start(3000)
 
             if event.matches(QKeySequence.Paste):
@@ -495,13 +615,64 @@ class ChatViewWidget(QWidget):
                             temp_path = temp_dir / "pygram_clipboard.png"
                             image.save(str(temp_path), "PNG")
                             try:
-                                send_file(self.shared_folder, self.current_chat_id, self.user.fp16, self.user.priv_pem, temp_path)
+                                send_file(
+                                    self.shared_folder,
+                                    self.current_chat_id,
+                                    self.user.fp16,
+                                    self.user.priv_pem,
+                                    temp_path,
+                                )
                                 self._trigger_sync()
                             except Exception as e:
                                 logger.error(f"Ошибка отправки скриншота: {e}")
                             temp_path.unlink(missing_ok=True)
                         return True
         return super().eventFilter(obj, event)
+
+    def _on_attachment_preview_requested(
+        self,
+        msg_id: str,
+        sender_fp16: str,
+        attachment_data: dict,
+    ):
+        """Запускает фоновую расшифровку изображения."""
+
+        if not self.current_chat_id:
+            self.delegate.set_attachment_preview_error(msg_id)
+            return
+
+        worker = AttachmentPreviewWorker(
+            self.shared_folder,
+            self.current_chat_id,
+            self.user.fp16,
+            self.user.priv_pem,
+            msg_id,
+            sender_fp16,
+            attachment_data,
+        )
+
+        worker.preview_ready.connect(self._on_attachment_preview_ready)
+        worker.preview_failed.connect(self._on_attachment_preview_failed)
+
+        worker.finished.connect(
+            lambda w=worker: (
+                self._active_workers.remove(w) if w in self._active_workers else None
+            )
+        )
+
+        self._active_workers.append(worker)
+        worker.start()
+
+    def _on_attachment_preview_ready(self, msg_id: str, image_data: bytes):
+        """Получает расшифрованное изображение из фонового потока."""
+
+        self.delegate.set_attachment_preview(msg_id, image_data)
+
+    def _on_attachment_preview_failed(self, msg_id: str, error: str):
+        """Обрабатывает ошибку расшифровки превью."""
+
+        logger.warning(f"Превью сообщения {msg_id} недоступно: {error}")
+        self.delegate.set_attachment_preview_error(msg_id)
 
     def load_chat(self, chat_id: str):
         self.current_chat_id = chat_id
@@ -548,7 +719,10 @@ class ChatViewWidget(QWidget):
 
         if chat_type == "group" and title.startswith("Группа "):
             real_name = get_group_display_name(
-                self.shared_folder, chat_id, self.user.fp16, self.user.priv_pem,
+                self.shared_folder,
+                chat_id,
+                self.user.fp16,
+                self.user.priv_pem,
             )
             if real_name:
                 title = real_name
@@ -563,7 +737,11 @@ class ChatViewWidget(QWidget):
                 avatar_path = profile_dir / f"{self.current_other_fp}.png"
                 if avatar_path.exists():
                     pixmap = QPixmap(str(avatar_path))
-                    self.avatar_label.setPixmap(pixmap.scaled(36, 36, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                    self.avatar_label.setPixmap(
+                        pixmap.scaled(
+                            36, 36, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                        )
+                    )
                     self.avatar_label.setVisible(True)
                 else:
                     self.avatar_label.setVisible(False)
@@ -571,7 +749,9 @@ class ChatViewWidget(QWidget):
             group_avatar_path = profile_dir / f"{chat_id}.png"
             if group_avatar_path.exists():
                 pixmap = QPixmap(str(group_avatar_path))
-                self.avatar_label.setPixmap(pixmap.scaled(36, 36, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                self.avatar_label.setPixmap(
+                    pixmap.scaled(36, 36, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                )
                 self.avatar_label.setVisible(True)
             else:
                 self.avatar_label.setVisible(False)
@@ -582,14 +762,16 @@ class ChatViewWidget(QWidget):
         self._update_status()
 
         self.delegate.font_size = font_size
-        self.delegate.show_header = (chat_type != "dm")
+        self.delegate.show_header = chat_type != "dm"
         self.delegate.profile_dir = profile_dir
         self.delegate.db = self.db
         # Проверяем, какая тема выбрана
         current_theme = self.db.get_setting("theme", "base")
         if current_theme == "custom":
             self.delegate.my_msg_bg = self.db.get_setting("color_my_msg", "#4a90e2")
-            self.delegate.other_msg_bg = self.db.get_setting("color_other_msg", "#e2a04a")
+            self.delegate.other_msg_bg = self.db.get_setting(
+                "color_other_msg", "#e2a04a"
+            )
         else:
             self.delegate.my_msg_bg = "#4a90e2"
             self.delegate.other_msg_bg = "#e2a04a"
@@ -609,10 +791,16 @@ class ChatViewWidget(QWidget):
         if not self.current_chat_id:
             return
 
-        msgs = self.db.get_messages_paginated(self.current_chat_id, self.limit, self.loaded_offset)
+        msgs = self.db.get_messages_paginated(
+            self.current_chat_id, self.limit, self.loaded_offset
+        )
 
         if msgs:
-            deleted_ids = set(get_deleted_messages(self.shared_folder, self.current_chat_id, self.user.fp16))
+            deleted_ids = set(
+                get_deleted_messages(
+                    self.shared_folder, self.current_chat_id, self.user.fp16
+                )
+            )
 
             formatted_msgs = []
             incoming_to_mark = []
@@ -620,15 +808,17 @@ class ChatViewWidget(QWidget):
             for m in msgs:
                 if m["msg_id"] in deleted_ids:
                     continue
-                formatted_msgs.append({
-                    "msg_id": m["msg_id"],
-                    "sender_fp16": m["sender_fp16"],
-                    "text": m["text"],
-                    "ts": m["ts"],
-                    "is_me": (m["sender_fp16"] == self.user.fp16),
-                    "read_status": "",  # Пусто, _refresh_read_status обновит при необходимости
-                    "reactions": self._get_reactions_cached(m["msg_id"]),
-                })
+                formatted_msgs.append(
+                    {
+                        "msg_id": m["msg_id"],
+                        "sender_fp16": m["sender_fp16"],
+                        "text": m["text"],
+                        "ts": m["ts"],
+                        "is_me": (m["sender_fp16"] == self.user.fp16),
+                        "read_status": "",  # Пусто, _refresh_read_status обновит при необходимости
+                        "reactions": self._get_reactions_cached(m["msg_id"]),
+                    }
+                )
 
                 if m["sender_fp16"] != self.user.fp16:
                     incoming_to_mark.append(m["msg_id"])
@@ -641,8 +831,10 @@ class ChatViewWidget(QWidget):
                 self.db.mark_messages_read(self.current_chat_id, incoming_to_mark)
                 # Шара (для галочек у отправителя)
                 mark_messages_read(
-                    self.shared_folder, self.current_chat_id,
-                    self.user.fp16, incoming_to_mark,
+                    self.shared_folder,
+                    self.current_chat_id,
+                    self.user.fp16,
+                    incoming_to_mark,
                 )
 
     def _get_reactions_cached(self, msg_id: str) -> dict:
@@ -683,6 +875,22 @@ class ChatViewWidget(QWidget):
             if new_reactions != m.get("reactions", {}):
                 self.messages_model.update_message_reactions(m["msg_id"], new_reactions)
 
+    def _parse_attachment(self, raw_text: str) -> dict:
+        """Разбирает метаданные зашифрованного вложения."""
+
+        if not raw_text.startswith("[FILE]") or not raw_text.endswith("[/FILE]"):
+            raise ValueError("Некорректный формат вложения")
+
+        try:
+            attachment_data = json.loads(raw_text[6:-7])
+        except (json.JSONDecodeError, TypeError) as e:
+            raise ValueError("Не удалось прочитать метаданные вложения") from e
+
+        if not isinstance(attachment_data, dict):
+            raise ValueError("Некорректные метаданные вложения")
+
+        return attachment_data
+
     def _refresh_read_status_if_changed(self) -> None:
         if not self.current_chat_id:
             return
@@ -700,9 +908,13 @@ class ChatViewWidget(QWidget):
 
         read_by_users = {}
         for fp in other_recipients:
-            read_by_users[fp] = set(get_read_messages(self.shared_folder, self.current_chat_id, fp))
+            read_by_users[fp] = set(
+                get_read_messages(self.shared_folder, self.current_chat_id, fp)
+            )
 
-        h = hash(tuple((fp, frozenset(msgs)) for fp, msgs in sorted(read_by_users.items())))
+        h = hash(
+            tuple((fp, frozenset(msgs)) for fp, msgs in sorted(read_by_users.items()))
+        )
         if h == self._last_read_hash:
             return
         self._last_read_hash = h
@@ -717,9 +929,11 @@ class ChatViewWidget(QWidget):
 
             # Определяем статус: True (все прочитали) или False
             if is_group:
-                is_read_by_all = all(msg_id in read_by_users[fp] for fp in other_recipients)
+                is_read_by_all = all(
+                    msg_id in read_by_users[fp] for fp in other_recipients
+                )
             else:
-                is_read_by_all = (msg_id in read_by_users[other_recipients[0]])
+                is_read_by_all = msg_id in read_by_users[other_recipients[0]]
 
             # Передаем строку "all", если прочитано, иначе пустую строку
             new_status = "all" if is_read_by_all else ""
@@ -735,12 +949,15 @@ class ChatViewWidget(QWidget):
 
         # --- 1. Удалённые ---
         current_deleted = set(
-            get_deleted_messages(self.shared_folder, self.current_chat_id, self.user.fp16)
+            get_deleted_messages(
+                self.shared_folder, self.current_chat_id, self.user.fp16
+            )
         )
         if len(current_deleted) != self._last_deleted_count:
             self._last_deleted_count = len(current_deleted)
             to_remove = [
-                m["msg_id"] for m in self.messages_model.messages
+                m["msg_id"]
+                for m in self.messages_model.messages
                 if m["msg_id"] in current_deleted
             ]
             for mid in to_remove:
@@ -760,7 +977,8 @@ class ChatViewWidget(QWidget):
         if msgs:
             last_ts_in_model = (
                 self.messages_model.messages[-1]["ts"]
-                if self.messages_model.messages else 0
+                if self.messages_model.messages
+                else 0
             )
 
             new_msgs = []
@@ -769,15 +987,17 @@ class ChatViewWidget(QWidget):
             for m in msgs:
                 if m["ts"] <= last_ts_in_model:
                     continue
-                new_msgs.append({
-                    "msg_id": m["msg_id"],
-                    "sender_fp16": m["sender_fp16"],
-                    "text": m["text"],
-                    "ts": m["ts"],
-                    "is_me": (m["sender_fp16"] == self.user.fp16),
-                    "read_status": "",  # Статус обновится ниже
-                    "reactions": self._get_reactions_cached(m["msg_id"]),
-                })
+                new_msgs.append(
+                    {
+                        "msg_id": m["msg_id"],
+                        "sender_fp16": m["sender_fp16"],
+                        "text": m["text"],
+                        "ts": m["ts"],
+                        "is_me": (m["sender_fp16"] == self.user.fp16),
+                        "read_status": "",  # Статус обновится ниже
+                        "reactions": self._get_reactions_cached(m["msg_id"]),
+                    }
+                )
                 if m["sender_fp16"] != self.user.fp16:
                     incoming_to_mark.append(m["msg_id"])
 
@@ -787,8 +1007,10 @@ class ChatViewWidget(QWidget):
                 if incoming_to_mark:
                     self.db.mark_messages_read(self.current_chat_id, incoming_to_mark)
                     mark_messages_read(
-                        self.shared_folder, self.current_chat_id,
-                        self.user.fp16, incoming_to_mark,
+                        self.shared_folder,
+                        self.current_chat_id,
+                        self.user.fp16,
+                        incoming_to_mark,
                     )
 
         # --- 4. Реакции и прочтения (только при изменении) ---
@@ -799,7 +1021,9 @@ class ChatViewWidget(QWidget):
         if self._sync_worker and self._sync_worker.isRunning():
             return
 
-        self._sync_worker = SyncWorker(self.shared_folder, self.current_chat_id, self.user.fp16, self.user.priv_pem)
+        self._sync_worker = SyncWorker(
+            self.shared_folder, self.current_chat_id, self.user.fp16, self.user.priv_pem
+        )
 
         def on_finished():
             if self._sync_worker in self._active_workers:
@@ -829,12 +1053,19 @@ class ChatViewWidget(QWidget):
             "ts": temp_ts,
             "is_me": True,
             "read_status": "",
-            "reactions": {}
+            "reactions": {},
         }
         self.messages_model.add_messages([optimistic_msg])
         self.messages_view.scrollToBottom()
 
-        worker = SendWorker(self.shared_folder, self.current_chat_id, self.user.fp16, self.user.priv_pem, text, self.db)
+        worker = SendWorker(
+            self.shared_folder,
+            self.current_chat_id,
+            self.user.fp16,
+            self.user.priv_pem,
+            text,
+            self.db,
+        )
 
         def on_finished(success, real_id):
             if success:
@@ -891,7 +1122,7 @@ class ChatViewWidget(QWidget):
         if msg_box.clickedButton() == btn_cancel:
             return
 
-        for_everyone = (msg_box.clickedButton() == btn_all)
+        for_everyone = msg_box.clickedButton() == btn_all
 
         # Берем КОПИЮ списка, так как при удалении из модели он может меняться
         msgs_to_delete = list(self.selected_msg_ids)
@@ -905,8 +1136,12 @@ class ChatViewWidget(QWidget):
 
         # Запускаем фоновое удаление с шары
         worker = DeleteWorker(
-            self.shared_folder, self.current_chat_id,
-            msgs_to_delete, self.user.fp16, for_everyone, self.db
+            self.shared_folder,
+            self.current_chat_id,
+            msgs_to_delete,
+            self.user.fp16,
+            for_everyone,
+            self.db,
         )
         # Важно: нельзя удалять воркер из списка до его завершения
         self._active_workers.append(worker)
@@ -922,7 +1157,10 @@ class ChatViewWidget(QWidget):
         meta = get_chat_meta(self.shared_folder, self.current_chat_id)
         if meta["type"] == "group":
             from src.ui.group_settings_view import GroupSettingsView
-            self.group_window = GroupSettingsView(self.shared_folder, self.user, self.current_chat_id)
+
+            self.group_window = GroupSettingsView(
+                self.shared_folder, self.user, self.current_chat_id
+            )
             self.group_window.show()
 
     def _on_chat_menu_clicked(self):
@@ -947,7 +1185,12 @@ class ChatViewWidget(QWidget):
                 data = json.loads(enc.decode("utf-8"))
                 if "nonce" in data and "ciphertext" in data:
                     aad = f"chat_id={self.current_chat_id}|meta".encode("utf-8")
-                    decrypted = aes_decrypt(group_key, from_base64(data["nonce"]), from_base64(data["ciphertext"]), aad=aad)
+                    decrypted = aes_decrypt(
+                        group_key,
+                        from_base64(data["nonce"]),
+                        from_base64(data["ciphertext"]),
+                        aad=aad,
+                    )
                     group_meta = json.loads(decrypted.decode("utf-8"))
 
                     if group_meta.get("creator_fp16") == self.user.fp16:
@@ -955,10 +1198,17 @@ class ChatViewWidget(QWidget):
                         act_delete_group = menu.addAction("💥 Удалить группу (у всех)")
                         act_delete_group.triggered.connect(self._delete_group_from_chat)
 
-        menu.exec(self.btn_chat_menu.mapToGlobal(self.btn_chat_menu.rect().bottomLeft()))
+        menu.exec(
+            self.btn_chat_menu.mapToGlobal(self.btn_chat_menu.rect().bottomLeft())
+        )
 
     def _clear_chat_history_self(self):
-        reply = QMessageBox.question(self, "Очистка", "Очистить историю чата у себя? (У собеседника останется)", QMessageBox.Yes | QMessageBox.No)
+        reply = QMessageBox.question(
+            self,
+            "Очистка",
+            "Очистить историю чата у себя? (У собеседника останется)",
+            QMessageBox.Yes | QMessageBox.No,
+        )
         if reply == QMessageBox.Yes:
             self.db.delete_chat_messages(self.current_chat_id)
             self.messages_model.clear()
@@ -966,11 +1216,12 @@ class ChatViewWidget(QWidget):
 
     def _clear_chat_history_all(self):
         reply = QMessageBox.question(
-            self, "Удаление у всех",
+            self,
+            "Удаление у всех",
             "Удалить ВСЮ историю чата у вас и у собеседника?\n"
             "Это действие необратимо.\n\n"
             "ВНИМАНИЕ: Сообщения будут ФИЗИЧЕСКИ УДАЛЕНЫ из сетевой папки!",
-            QMessageBox.Yes | QMessageBox.No
+            QMessageBox.Yes | QMessageBox.No,
         )
         if reply == QMessageBox.Yes:
             try:
@@ -985,19 +1236,27 @@ class ChatViewWidget(QWidget):
                 # 3. Очищаем UI
                 self.messages_model.clear()
 
-                QMessageBox.information(self, "Успех", "Вся история физически удалена с шары")
+                QMessageBox.information(
+                    self, "Успех", "Вся история физически удалена с шары"
+                )
             except Exception as e:
                 QMessageBox.warning(self, "Ошибка", str(e))
 
     def _delete_group_from_chat(self):
         reply = QMessageBox.question(
-            self, "Удаление группы",
+            self,
+            "Удаление группы",
             "Вы уверены, что хотите ПОЛНОСТЬЮ удалить группу?\nВсе сообщения и файлы будут стерты.",
-            QMessageBox.Yes | QMessageBox.No
+            QMessageBox.Yes | QMessageBox.No,
         )
         if reply == QMessageBox.Yes:
             try:
-                delete_group_chat(self.shared_folder, self.current_chat_id, self.user.fp16, self.user.priv_pem)
+                delete_group_chat(
+                    self.shared_folder,
+                    self.current_chat_id,
+                    self.user.fp16,
+                    self.user.priv_pem,
+                )
                 QMessageBox.information(self, "Успех", "Группа удалена")
                 self.messages_model.clear()
                 self.current_chat_id = None
@@ -1012,11 +1271,15 @@ class ChatViewWidget(QWidget):
 
         viewer_is_admin = can_read_all_chats(self.shared_folder, self.user.fp16)
         status = get_status(
-            self.shared_folder, self.current_other_fp,
+            self.shared_folder,
+            self.current_other_fp,
             viewer_fp16=self.user.fp16,
             viewer_is_admin=viewer_is_admin,
         )
-        typing = status.get("typing", False) and status.get("typing_chat") == self.current_chat_id
+        typing = (
+            status.get("typing", False)
+            and status.get("typing_chat") == self.current_chat_id
+        )
         online = status.get("online", False)
         last_seen = status.get("last_seen", 0)
 
@@ -1042,11 +1305,17 @@ class ChatViewWidget(QWidget):
         meta = get_chat_meta(self.shared_folder, self.current_chat_id)
         if meta["type"] == "dm" and self.current_other_fp:
             from src.ui.profile_view import ProfileView
-            self.profile_window = ProfileView(self.shared_folder, self.user, target_fp16=self.current_other_fp)
+
+            self.profile_window = ProfileView(
+                self.shared_folder, self.user, target_fp16=self.current_other_fp
+            )
             self.profile_window.show()
         elif meta["type"] == "group":
             from src.ui.group_settings_view import GroupSettingsView
-            self.group_window = GroupSettingsView(self.shared_folder, self.user, self.current_chat_id)
+
+            self.group_window = GroupSettingsView(
+                self.shared_folder, self.user, self.current_chat_id
+            )
             self.group_window.show()
 
     def _on_attach_clicked(self):
@@ -1055,7 +1324,13 @@ class ChatViewWidget(QWidget):
         file_path, _ = QFileDialog.getOpenFileName(self, "Выберите файл")
         if file_path:
             try:
-                send_file(self.shared_folder, self.current_chat_id, self.user.fp16, self.user.priv_pem, file_path)
+                send_file(
+                    self.shared_folder,
+                    self.current_chat_id,
+                    self.user.fp16,
+                    self.user.priv_pem,
+                    file_path,
+                )
                 self._trigger_sync()
             except Exception as e:
                 logger.error(f"Ошибка отправки файла: {e}")
@@ -1063,10 +1338,14 @@ class ChatViewWidget(QWidget):
     # ========================================================================
     # ЛЕВЫЙ КЛИК
     # ========================================================================
+
     def _on_message_left_click(self, index: QModelIndex):
+        import json
+
         msg_data = index.data(Qt.UserRole)
         if not msg_data:
             return
+
         msg_id = msg_data["msg_id"]
         raw_text = msg_data["text"]
 
@@ -1074,43 +1353,178 @@ class ChatViewWidget(QWidget):
             self._toggle_message_selection(msg_id)
             return
 
-        if raw_text.startswith("[FILE]") and raw_text.endswith("[/FILE]"):
-            inner = raw_text[6:-7]
-            if "|" in inner:
-                stored_name, original_name = inner.split("|", 1)
-            else:
-                stored_name = original_name = inner
-
-            file_path = chat_files_dir(self.shared_folder, self.current_chat_id) / stored_name
-            ext = stored_name.lower().split('.')[-1]
-
-            if not file_path.exists():
-                QMessageBox.warning(self, "Ошибка", "Файл не найден на диске.")
-                return
-
-            if ext in ('png', 'jpg', 'jpeg', 'gif', 'bmp'):
-                try:
-                    os.startfile(str(file_path))
-                except Exception as e:
-                    logger.error(f"Не удалось открыть изображение: {e}")
-                    QMessageBox.warning(self, "Ошибка", f"Не удалось открыть файл: {e}")
-            else:
-                default_dir = self.db.get_setting("download_dir", str(Path.home() / "Downloads"))
-                save_path = Path(default_dir) / original_name
-
-                counter = 1
-                while save_path.exists():
-                    save_path = Path(default_dir) / f"{Path(original_name).stem} ({counter}){Path(original_name).suffix}"
-                    counter += 1
-
-                try:
-                    Path(default_dir).mkdir(parents=True, exist_ok=True)
-                    self._download_with_progress(file_path, save_path, original_name)
-                except Exception as e:
-                    QMessageBox.warning(self, "Ошибка", f"Не удалось сохранить файл: {e}")
+        if not (raw_text.startswith("[FILE]") and raw_text.endswith("[/FILE]")):
             return
 
-    def _download_with_progress(self, src_path: Path, dest_path: Path, original_name: str):
+        # Получаем метаданные вложения.
+        inner = raw_text[6:-7]
+
+        try:
+            attachment_data = json.loads(inner)
+        except (ValueError, TypeError):
+            QMessageBox.warning(
+                self,
+                "Старое вложение",
+                "Это вложение создано в старом формате и пока не поддерживается.",
+            )
+            return
+
+        if not isinstance(attachment_data, dict):
+            QMessageBox.warning(self, "Ошибка", "Некорректные данные вложения.")
+            return
+
+        original_name = attachment_data.get("original_name")
+
+        if not isinstance(original_name, str) or not original_name:
+            QMessageBox.warning(self, "Ошибка", "Не указано имя файла.")
+            return
+
+        # Расшифровываем файл в оперативную память.
+
+        try:
+            file_data = decrypt_attachment_to_bytes(
+                self.shared_folder,
+                self.current_chat_id,
+                self.user.fp16,
+                self.user.priv_pem,
+                msg_data.get("sender_fp16", ""),
+                attachment_data,
+                # здесь оставь остальные свои аргументы
+            )
+
+        except Exception as e:
+            logger.exception(f"SAVE AS: ошибка при расшифровке вложения {msg_id}")
+            QMessageBox.warning(
+                self,
+                "Ошибка",
+                f"Не удалось открыть вложение:\n{e}",
+            )
+            return
+
+        ext = Path(original_name).suffix.lower()
+        image_extensions = {".png", ".jpg", ".jpeg", ".gif", ".bmp"}
+
+        # Изображения показываем прямо в приложении, без создания
+        # незашифрованной копии на диске.
+        if ext in image_extensions:
+            from PySide6.QtWidgets import QDialog, QLabel, QVBoxLayout, QSizePolicy
+            from PySide6.QtGui import QPixmap
+
+            pixmap = QPixmap()
+
+            if not pixmap.loadFromData(file_data):
+                QMessageBox.warning(
+                    self,
+                    "Ошибка",
+                    "Не удалось прочитать изображение.",
+                )
+                return
+
+            class ResizableImageLabel(QLabel):
+                def __init__(self, original_pixmap, parent=None):
+                    super().__init__(parent)
+                    self.original_pixmap = original_pixmap
+                    self.setAlignment(Qt.AlignCenter)
+                    self.setMinimumSize(1, 1)
+                    self.setSizePolicy(
+                        QSizePolicy.Expanding,
+                        QSizePolicy.Expanding,
+                    )
+
+                def resizeEvent(self, event):
+                    super().resizeEvent(event)
+                    scaled = self.original_pixmap.scaled(
+                        self.size(),
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation,
+                    )
+                    self.setPixmap(scaled)
+
+            dialog = QDialog(None)
+            dialog.setWindowTitle(original_name)
+
+            dialog.setWindowFlags(
+                Qt.Window
+                | Qt.WindowMinimizeButtonHint
+                | Qt.WindowMaximizeButtonHint
+                | Qt.WindowCloseButtonHint
+            )
+
+            dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+            dialog.setModal(False)
+
+            label = ResizableImageLabel(pixmap, dialog)
+
+            layout = QVBoxLayout(dialog)
+            layout.addWidget(label)
+
+            dialog.resize(
+                min(pixmap.width() + 30, 1100),
+                min(pixmap.height() + 30, 850),
+            )
+
+            # Храним ссылки на открытые окна, чтобы Python
+            # не удалял их после завершения метода.
+            if not hasattr(self, "_image_viewers"):
+                self._image_viewers = []
+
+            self._image_viewers.append(dialog)
+
+            dialog.destroyed.connect(
+                lambda *args, d=dialog: (
+                    self._image_viewers.remove(d)
+                    if d in self._image_viewers
+                    else None
+                )
+            )
+
+            dialog.show()
+            dialog.raise_()
+            return
+
+        # Остальные файлы автоматически сохраняем в папку из настроек.
+        default_dir = Path(
+            self.db.get_setting(
+                "download_dir",
+                str(Path.home() / "Downloads"),
+            )
+        )
+
+        try:
+            default_dir.mkdir(parents=True, exist_ok=True)
+
+            save_path = default_dir / original_name
+
+            # Если файл с таким именем уже существует,
+            # добавляем номер, чтобы не перезаписать его.
+            counter = 1
+            while save_path.exists():
+                stem = Path(original_name).stem
+                suffix = Path(original_name).suffix
+                save_path = default_dir / f"{stem} ({counter}){suffix}"
+                counter += 1
+
+            save_path.write_bytes(file_data)
+
+            logger.info(f"Вложение сохранено: {save_path}")
+
+            QMessageBox.information(
+                self,
+                "Файл сохранён",
+                f"Файл скачан в:\n{save_path}",
+            )
+
+        except Exception as e:
+            logger.exception("Не удалось сохранить вложение")
+            QMessageBox.warning(
+                self,
+                "Ошибка",
+                f"Не удалось сохранить файл:\n{e}",
+            )
+
+    def _download_with_progress(
+        self, src_path: Path, dest_path: Path, original_name: str
+    ):
         dialog = DownloadProgressDialog(original_name, self)
         worker = DownloadWorker(src_path, dest_path)
 
@@ -1119,9 +1533,13 @@ class ChatViewWidget(QWidget):
         def on_finished(success, error):
             dialog.accept()
             if success:
-                QMessageBox.information(self, "Файл сохранён", f"Файл сохранён в:\n{dest_path}")
+                QMessageBox.information(
+                    self, "Файл сохранён", f"Файл сохранён в:\n{dest_path}"
+                )
             else:
-                QMessageBox.warning(self, "Ошибка", f"Не удалось сохранить файл:\n{error}")
+                QMessageBox.warning(
+                    self, "Ошибка", f"Не удалось сохранить файл:\n{error}"
+                )
             if worker in self._active_workers:
                 self._active_workers.remove(worker)
 
@@ -1145,45 +1563,28 @@ class ChatViewWidget(QWidget):
 
         if raw_text.startswith("[FILE]") and raw_text.endswith("[/FILE]"):
             inner = raw_text[6:-7]
-            if "|" in inner:
-                stored_name, original_name = inner.split("|", 1)
-            else:
-                stored_name = original_name = inner
 
-            file_path = chat_files_dir(self.shared_folder, self.current_chat_id) / stored_name
-            ext = stored_name.lower().split('.')[-1]
+            try:
+                attachment_data = json.loads(inner)
+            except (ValueError, TypeError):
+                QMessageBox.warning(
+                    self,
+                    "Ошибка",
+                    "Некорректные метаданные вложения.",
+                )
+                return
+
+            if not isinstance(attachment_data, dict):
+                return
+
+            original_name = attachment_data.get("original_name", "attachment")
 
             menu = QMenu(self)
 
-            if ext in ('png', 'jpg', 'jpeg', 'gif', 'bmp'):
-                action_open = menu.addAction("🖼 Открыть")
-                action_open.triggered.connect(lambda: os.startfile(str(file_path)))
-
             action_save = menu.addAction("💾 Сохранить как...")
-            action_save.triggered.connect(lambda: self._save_file_dialog(file_path, original_name))
-
-            quick_emoji = self.db.get_setting("quick_reaction", "❤️")
-            reactions = get_reactions(self.shared_folder, self.current_chat_id, msg_id)
-            my_reaction = reactions.get(self.user.fp16)
-
-            menu.addSeparator()
-            if my_reaction:
-                action_remove = menu.addAction(f"Убрать {my_reaction}")
-                action_remove.triggered.connect(lambda: self._remove_reaction(msg_id))
-                if my_reaction != quick_emoji:
-                    action_quick = menu.addAction(f"Поставить {quick_emoji}")
-                    action_quick.triggered.connect(lambda: self._set_reaction(msg_id, quick_emoji))
-            else:
-                action_quick = menu.addAction(f"Поставить {quick_emoji}")
-                action_quick.triggered.connect(lambda: self._set_reaction(msg_id, quick_emoji))
-
-            if reactions:
-                action_show = menu.addAction("👀 Показать, кто поставил")
-                action_show.triggered.connect(lambda: self._show_reaction_details(msg_id))
-
-            menu.addSeparator()
-            action_select = menu.addAction("☑️ Выбрать")
-            action_select.triggered.connect(lambda: self._enter_selection_mode_and_select(msg_id))
+            action_save.triggered.connect(
+                lambda: self._save_attachment(attachment_data, original_name, msg_data)
+            )
 
             menu.exec(self.messages_view.mapToGlobal(pos))
             return
@@ -1194,25 +1595,56 @@ class ChatViewWidget(QWidget):
 
         self._show_message_menu(msg_id, self.messages_view.mapToGlobal(pos))
 
-    def _save_file_dialog(self, file_path: Path, original_name: str):
-        if not file_path.exists():
-            QMessageBox.warning(self, "Ошибка", "Файл не найден на диске.")
-            return
-
-        default_dir = self.db.get_setting("download_dir", str(Path.home() / "Downloads"))
-
-        save_path, _ = QFileDialog.getSaveFileName(
-            self, "Сохранить файл",
-            str(Path(default_dir) / original_name),
-            "All Files (*)"
+    def _save_attachment(
+            self,
+            attachment_data: dict,
+            original_name: str,
+            msg_data: dict,
+    ):
+        default_dir = self.db.get_setting(
+            "download_dir",
+            str(Path.home() / "Downloads"),
         )
 
-        if save_path:
-            try:
-                shutil.copy2(file_path, save_path)
-                QMessageBox.information(self, "Успех", f"Файл сохранён в:\n{save_path}")
-            except Exception as e:
-                QMessageBox.warning(self, "Ошибка", f"Не удалось сохранить файл: {e}")
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Сохранить вложение",
+            str(Path(default_dir) / original_name),
+            "Все файлы (*.*)",
+        )
+
+        if not save_path:
+            return
+
+        try:
+            file_data = decrypt_attachment_to_bytes(
+                self.shared_folder,
+                self.current_chat_id,
+                self.user.fp16,
+                self.user.priv_pem,
+                msg_data.get("sender_fp16", ""),
+                attachment_data,
+            )
+
+            save_path = Path(save_path)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            save_path.write_bytes(file_data)
+
+            logger.info(f"Вложение сохранено: {save_path}")
+
+            QMessageBox.information(
+                self,
+                "Успех",
+                f"Файл сохранён в:\n{save_path}",
+            )
+
+        except Exception as e:
+            logger.exception("Не удалось сохранить вложение")
+            QMessageBox.warning(
+                self,
+                "Ошибка",
+                f"Не удалось сохранить файл:\n{e}",
+            )
 
     def _show_message_menu(self, msg_id: str, global_pos: QPoint):
         menu = QMenu(self)
@@ -1226,10 +1658,14 @@ class ChatViewWidget(QWidget):
                 action_remove.triggered.connect(lambda: self._remove_reaction(msg_id))
                 if my_reaction != quick_emoji:
                     action_quick = menu.addAction(f"Поставить {quick_emoji}")
-                    action_quick.triggered.connect(lambda: self._set_reaction(msg_id, quick_emoji))
+                    action_quick.triggered.connect(
+                        lambda: self._set_reaction(msg_id, quick_emoji)
+                    )
             else:
                 action_quick = menu.addAction(f"Поставить {quick_emoji}")
-                action_quick.triggered.connect(lambda: self._set_reaction(msg_id, quick_emoji))
+                action_quick.triggered.connect(
+                    lambda: self._set_reaction(msg_id, quick_emoji)
+                )
 
             menu.addSeparator()
             action_all = menu.addAction("Все реакции...")
@@ -1238,11 +1674,15 @@ class ChatViewWidget(QWidget):
             if reactions:
                 menu.addSeparator()
                 action_show = menu.addAction("👀 Показать, кто поставил")
-                action_show.triggered.connect(lambda: self._show_reaction_details(msg_id))
+                action_show.triggered.connect(
+                    lambda: self._show_reaction_details(msg_id)
+                )
 
         menu.addSeparator()
         action_select = menu.addAction("☑️ Выбрать")
-        action_select.triggered.connect(lambda: self._enter_selection_mode_and_select(msg_id))
+        action_select.triggered.connect(
+            lambda: self._enter_selection_mode_and_select(msg_id)
+        )
 
         menu.exec(global_pos)
 
@@ -1263,6 +1703,7 @@ class ChatViewWidget(QWidget):
         """)
 
         from collections import defaultdict
+
         grouped = defaultdict(list)
         for fp16, emoji in reactions.items():
             grouped[emoji].append(fp16)
@@ -1285,13 +1726,17 @@ class ChatViewWidget(QWidget):
     def _set_reaction(self, msg_id: str, emoji: str):
         try:
             set_reaction(
-                self.shared_folder, self.current_chat_id, msg_id,
-                self.user.fp16, emoji,
+                self.shared_folder,
+                self.current_chat_id,
+                msg_id,
+                self.user.fp16,
+                emoji,
             )
         except Exception as e:
             logger.warning(f"Не удалось поставить реакцию: {e}")
             QMessageBox.warning(
-                self, "Сеть",
+                self,
+                "Сеть",
                 "Не удалось сохранить реакцию на сетевой папке.\n"
                 "Попробуйте ещё раз через пару секунд.",
             )
@@ -1301,13 +1746,17 @@ class ChatViewWidget(QWidget):
     def _remove_reaction(self, msg_id: str):
         try:
             set_reaction(
-                self.shared_folder, self.current_chat_id, msg_id,
-                self.user.fp16, None,
+                self.shared_folder,
+                self.current_chat_id,
+                msg_id,
+                self.user.fp16,
+                None,
             )
         except Exception as e:
             logger.warning(f"Не удалось убрать реакцию: {e}")
             QMessageBox.warning(
-                self, "Сеть",
+                self,
+                "Сеть",
                 "Не удалось обновить реакцию на сетевой папке.\n"
                 "Попробуйте ещё раз через пару секунд.",
             )
@@ -1324,11 +1773,25 @@ class ChatViewWidget(QWidget):
         if not self._reaction_msg_id or self._reaction_msg_id.startswith("pending_"):
             return
         try:
-            reactions = get_reactions(self.shared_folder, self.current_chat_id, self._reaction_msg_id)
+            reactions = get_reactions(
+                self.shared_folder, self.current_chat_id, self._reaction_msg_id
+            )
             if reactions.get(self.user.fp16) == emoji:
-                set_reaction(self.shared_folder, self.current_chat_id, self._reaction_msg_id, self.user.fp16, None)
+                set_reaction(
+                    self.shared_folder,
+                    self.current_chat_id,
+                    self._reaction_msg_id,
+                    self.user.fp16,
+                    None,
+                )
             else:
-                set_reaction(self.shared_folder, self.current_chat_id, self._reaction_msg_id, self.user.fp16, emoji)
+                set_reaction(
+                    self.shared_folder,
+                    self.current_chat_id,
+                    self._reaction_msg_id,
+                    self.user.fp16,
+                    emoji,
+                )
             self._sync_and_render()
         except Exception as e:
             logger.error(f"Ошибка установки реакции: {e}")

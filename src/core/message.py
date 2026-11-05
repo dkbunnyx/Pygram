@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import time
 import uuid
 import shutil
@@ -12,17 +13,37 @@ from pathlib import Path
 from loguru import logger
 
 from src.core.crypto import (
-    aes_decrypt, aes_encrypt, from_base64, rsa_sign, rsa_verify, to_base64,
-    unwrap_key, hybrid_encrypt, hybrid_decrypt, fingerprint, load_private_key,
+    aes_decrypt,
+    aes_encrypt,
+    from_base64,
+    rsa_sign,
+    rsa_verify,
+    to_base64,
+    unwrap_key,
+    hybrid_encrypt,
+    hybrid_decrypt,
+    fingerprint,
+    load_private_key,
     make_message_aad,
+    encrypt_file_stream,
+    decrypt_file_stream,
+    FILE_ENCRYPTION_VERSION,
+    wrap_file_key_for_group,
+    unwrap_file_key_for_group,
+    wrap_key_for_recipients,
 )
+
 # П.2: verified — подписи проверены. load_admins (сырой) НЕ используем.
 from src.core.admin import load_admins_verified, can_read_all_chats
 from src.storage.shared_store import (
-    chat_message_dir, chat_files_dir, load_chat_keys, load_chat_meta,
-    load_chat_meta_enc, load_pub_key_by_fp16, write_bytes_atomic,
+    chat_message_dir,
+    chat_files_dir,
+    load_chat_keys,
+    load_chat_meta,
+    load_chat_meta_enc,
+    load_pub_key_by_fp16,
+    write_bytes_atomic,
 )
-
 
 MAX_IMAGE_WIDTH = 1920
 JPEG_QUALITY = 85
@@ -59,10 +80,19 @@ def _prepare_chat_keys(shared_folder, chat_id, my_fp16, my_priv_pem):
     if chat_type == "dm":
         enc = load_chat_meta_enc(shared_folder, chat_id)
         participants = json.loads(enc.decode("utf-8")).get("participants", [])
-        if my_fp16 not in participants and not can_read_all_chats(shared_folder, my_fp16):
+
+        if my_fp16 not in participants and not can_read_all_chats(
+            shared_folder, my_fp16
+        ):
             raise ValueError(f"У вас нет доступа к чату {chat_id}")
-        my_pub_pem = load_private_key(my_priv_pem).publickey().export_key().decode("ascii")
+
+        my_pub_pem = (
+            load_private_key(my_priv_pem).publickey().export_key().decode("ascii")
+        )
         return chat_type, None, fingerprint(my_pub_pem)
+
+    if chat_type not in ("group", "favorites", "admin_chat"):
+        raise ValueError(f"Неизвестный тип чата: {chat_type}")
 
     try:
         group_key = _get_group_key(shared_folder, chat_id, my_fp16, my_priv_pem)
@@ -71,6 +101,7 @@ def _prepare_chat_keys(shared_folder, chat_id, my_fp16, my_priv_pem):
             logger.warning(f"Админ {my_fp16} без ключа от {chat_id}")
             return chat_type, None, None
         raise
+
     return chat_type, group_key, None
 
 
@@ -95,7 +126,8 @@ def send_message(shared_folder, chat_id, sender_fp16, sender_priv_pem, text) -> 
         # дописавший себя в .admins/list.json без подписи, получит ключи.
         admins_data = load_admins_verified(shared_folder)
         admin_fps = [
-            a["fp16"] for a in admins_data
+            a["fp16"]
+            for a in admins_data
             if a.get("is_super") or a.get("can_read_all_chats")
         ]
 
@@ -119,8 +151,12 @@ def send_message(shared_folder, chat_id, sender_fp16, sender_priv_pem, text) -> 
             + msg_id.encode("utf-8")
         )
         container = {
-            "version": 2, "sender_fp16": sender_fp16, "ts": ts, "msg_id": msg_id,
-            "nonce": pkg["nonce"], "ciphertext": pkg["ciphertext"],
+            "version": 2,
+            "sender_fp16": sender_fp16,
+            "ts": ts,
+            "msg_id": msg_id,
+            "nonce": pkg["nonce"],
+            "ciphertext": pkg["ciphertext"],
             "wrapped_keys": pkg["wrapped_keys"],
             "signature": to_base64(rsa_sign(sender_priv_pem, sign_payload)),
         }
@@ -131,8 +167,12 @@ def send_message(shared_folder, chat_id, sender_fp16, sender_priv_pem, text) -> 
         signature = rsa_sign(sender_priv_pem, sign_payload)
 
         container = {
-            "version": 2, "sender_fp16": sender_fp16, "ts": ts, "msg_id": msg_id,
-            "nonce": to_base64(nonce), "ciphertext": to_base64(ciphertext),
+            "version": 2,
+            "sender_fp16": sender_fp16,
+            "ts": ts,
+            "msg_id": msg_id,
+            "nonce": to_base64(nonce),
+            "ciphertext": to_base64(ciphertext),
             "signature": to_base64(signature),
         }
 
@@ -145,6 +185,7 @@ def send_message(shared_folder, chat_id, sender_fp16, sender_priv_pem, text) -> 
 
 def _process_image(file_path: Path, dest_path: Path) -> None:
     from PIL import Image
+
     img = Image.open(file_path)
     ext = file_path.suffix.lower()
 
@@ -167,33 +208,426 @@ def _process_image(file_path: Path, dest_path: Path) -> None:
 
 def send_file(shared_folder, chat_id, sender_fp16, sender_priv_pem, file_path) -> str:
     file_path = Path(file_path)
+
     if not file_path.is_file():
         raise ValueError("Файл не найден")
+
     if file_path.stat().st_size > MAX_FILE_SIZE:
         raise ValueError(f"Файл больше {MAX_FILE_SIZE // (1024 * 1024)} МБ")
+
+    # Проверяем доступ отправителя и получаем ключ группы,
+    # если это групповой чат.
+    chat_type, group_key, _ = _prepare_chat_keys(
+        shared_folder,
+        chat_id,
+        sender_fp16,
+        sender_priv_pem,
+    )
+
+    if chat_type != "dm" and group_key is None:
+        raise ValueError("Нет ключа для шифрования вложения")
+
+    original_name = file_path.name
+    stored_name = f"{uuid.uuid4().hex}_{original_name}"
 
     files_dir = chat_files_dir(shared_folder, chat_id)
     files_dir.mkdir(parents=True, exist_ok=True)
 
-    original_name = file_path.name
-    ext = file_path.suffix.lower()
-    stored_name = f"{uuid.uuid4().hex}_{original_name}"
     dest_path = files_dir / stored_name
+    logger.debug(f"ATTACHMENT SAVE PATH: {dest_path}")
 
-    if ext in ('.png', '.jpg', '.jpeg'):
-        try:
-            _process_image(file_path, dest_path)
-        except Exception as e:
-            logger.error(f"Ошибка сжатия картинки {original_name}: {e}. Копирую как есть.")
-            shutil.copy2(file_path, dest_path)
+    # AAD связывает зашифрованный файл с конкретным чатом,
+    # именем файла и отправителем.
+    aad = (
+        f"pygram-file-v{FILE_ENCRYPTION_VERSION}"
+        f"|chat_id={chat_id}"
+        f"|stored_name={stored_name}"
+        f"|sender={sender_fp16}"
+    ).encode("utf-8")
+
+    encrypted_file_created = False
+
+    try:
+        # Для изображений сохраняем прежнюю обработку:
+        # уменьшаем слишком большие картинки перед шифрованием.
+        # Временная копия находится локально, не на общей папке.
+        with tempfile.TemporaryDirectory(prefix="pygram-file-") as temp_dir:
+            source_to_encrypt = file_path
+
+            if file_path.suffix.lower() in (".png", ".jpg", ".jpeg"):
+                processed_path = Path(temp_dir) / original_name
+
+                try:
+                    _process_image(file_path, processed_path)
+                    source_to_encrypt = processed_path
+                except Exception as e:
+                    logger.warning(
+                        f"Не удалось обработать изображение "
+                        f"{original_name}: {e}. Отправляю оригинал."
+                    )
+
+            # Каждый файл получает собственный случайный AES-ключ.
+            file_key, nonce, tag, plaintext_size = encrypt_file_stream(
+                source_to_encrypt,
+                dest_path,
+                aad=aad,
+            )
+
+        encrypted_file_created = True
+
+        # Передаём ключ файла только тем, кому разрешено его читать.
+        if chat_type == "dm":
+            enc = load_chat_meta_enc(shared_folder, chat_id)
+            participants = json.loads(enc.decode("utf-8")).get("participants", [])
+
+            admins_data = load_admins_verified(shared_folder)
+            admin_fps = [
+                a["fp16"]
+                for a in admins_data
+                if a.get("is_super") or a.get("can_read_all_chats")
+            ]
+
+            all_recipients = set(participants) | set(admin_fps)
+            recipients = {}
+
+            for recipient_fp in all_recipients:
+                try:
+                    recipients[recipient_fp] = load_pub_key_by_fp16(
+                        shared_folder,
+                        recipient_fp,
+                    )
+                except FileNotFoundError:
+                    logger.warning(
+                        f"Публичный ключ получателя {recipient_fp} не найден"
+                    )
+
+            if not recipients:
+                raise ValueError("Нет получателей с известными ключами")
+
+            wrapped_keys = wrap_key_for_recipients(
+                file_key,
+                recipients,
+            )
+
+            key_data = {
+                "mode": "rsa",
+                "wrapped_keys": wrapped_keys,
+            }
+
+        else:
+            wrapped_key = wrap_file_key_for_group(
+                file_key,
+                group_key,
+                aad=aad,
+            )
+
+            key_data = {
+                "mode": "group",
+                "wrapped_key": wrapped_key,
+            }
+
+        # Метаданные отправляются внутри зашифрованного сообщения.
+        attachment_data = {
+            "version": FILE_ENCRYPTION_VERSION,
+            "stored_name": stored_name,
+            "original_name": original_name,
+            "nonce": to_base64(nonce),
+            "tag": to_base64(tag),
+            "size": plaintext_size,
+            **key_data,
+        }
+
+        marker = (
+            "[FILE]"
+            + json.dumps(
+                attachment_data,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "[/FILE]"
+        )
+
+        # Если сообщение не отправится, ниже удалим файл-сироту.
+        return send_message(
+            shared_folder,
+            chat_id,
+            sender_fp16,
+            sender_priv_pem,
+            marker,
+        )
+
+    except Exception:
+        if encrypted_file_created:
+            dest_path.unlink(missing_ok=True)
+        raise
+
+
+def decrypt_attachment_to_path(
+    shared_folder,
+    chat_id,
+    my_fp16,
+    my_priv_pem,
+    sender_fp16,
+    attachment_data,
+    destination_path,
+) -> int:
+    """Расшифровывает вложение в указанный файл.
+
+    Возвращает размер расшифрованных данных в байтах.
+    """
+
+    if not isinstance(attachment_data, dict):
+        raise ValueError("Некорректные метаданные вложения")
+
+    # Проверяем версию формата.
+    if attachment_data.get("version") != FILE_ENCRYPTION_VERSION:
+        raise ValueError("Неподдерживаемая версия вложения")
+
+    stored_name = attachment_data.get("stored_name")
+
+    if not isinstance(stored_name, str) or not stored_name:
+        raise ValueError("Не указано имя файла")
+
+    # Запрещаем пути и попытки выйти из папки вложений.
+    if (
+        Path(stored_name).name != stored_name
+        or "/" in stored_name
+        or "\\" in stored_name
+        or stored_name in (".", "..")
+    ):
+        raise ValueError("Некорректное имя вложения")
+
+    expected_size = attachment_data.get("size")
+
+    if type(expected_size) is not int or not 0 <= expected_size <= MAX_FILE_SIZE:
+        raise ValueError("Некорректный размер вложения")
+
+    # Получаем ключи текущего чата и проверяем доступ пользователя.
+    chat_type, group_key, my_full_fp = _prepare_chat_keys(
+        shared_folder,
+        chat_id,
+        my_fp16,
+        my_priv_pem,
+    )
+
+    aad = (
+        f"pygram-file-v{FILE_ENCRYPTION_VERSION}"
+        f"|chat_id={chat_id}"
+        f"|stored_name={stored_name}"
+        f"|sender={sender_fp16}"
+    ).encode("utf-8")
+
+    mode = attachment_data.get("mode")
+
+    # Получаем индивидуальный AES-ключ файла.
+    if chat_type == "dm":
+        if mode != "rsa":
+            raise ValueError("Неверный способ шифрования личного вложения")
+
+        wrapped_keys = attachment_data.get("wrapped_keys")
+
+        if not isinstance(wrapped_keys, dict):
+            raise ValueError("Отсутствуют ключи получателей")
+
+        if my_full_fp is None:
+            raise ValueError("Не удалось определить ключ пользователя")
+
+        file_key = unwrap_key(
+            wrapped_keys,
+            my_full_fp,
+            my_priv_pem,
+        )
+
+    elif chat_type in ("group", "favorites", "admin_chat"):
+        if mode != "group":
+            raise ValueError("Неверный способ шифрования группового вложения")
+
+        if group_key is None:
+            raise ValueError("Нет ключа группы")
+
+        wrapped_key = attachment_data.get("wrapped_key")
+
+        if not isinstance(wrapped_key, dict):
+            raise ValueError("Отсутствует зашифрованный ключ файла")
+
+        file_key = unwrap_file_key_for_group(
+            wrapped_key,
+            group_key,
+            aad=aad,
+        )
+
     else:
-        shutil.copy2(file_path, dest_path)
+        raise ValueError("Неизвестный тип чата")
 
-    text = f"[FILE]{stored_name}|{original_name}[/FILE]"
-    return send_message(shared_folder, chat_id, sender_fp16, sender_priv_pem, text)
+    nonce = from_base64(attachment_data["nonce"])
+    tag = from_base64(attachment_data["tag"])
+
+    files_dir = chat_files_dir(shared_folder, chat_id)
+    encrypted_path = files_dir / stored_name
+    logger.info(f"ATTACHMENT LOAD PATH: {encrypted_path}")
+    logger.info(f"ATTACHMENT EXISTS: {encrypted_path.is_file()}")
+
+    if not encrypted_path.is_file():
+        raise FileNotFoundError("Вложение не найдено на общей папке")
+
+    if encrypted_path.stat().st_size > MAX_FILE_SIZE:
+        raise ValueError("Зашифрованное вложение превышает допустимый размер")
+
+    destination_path = Path(destination_path)
+
+    # Расшифровка атомарная: конечный файл появится только
+    # после успешной проверки AES-GCM.
+    actual_size = decrypt_file_stream(
+        encrypted_path,
+        destination_path,
+        file_key,
+        nonce,
+        tag,
+        aad=aad,
+    )
+
+    if actual_size != expected_size:
+        destination_path.unlink(missing_ok=True)
+        raise ValueError("Размер расшифрованного файла не совпадает с метаданными")
+
+    return actual_size
 
 
-def _decrypt_message_file(shared_folder, chat_id, my_fp16, my_priv_pem, msg_file, chat_type, group_key, my_full_fp) -> Message | None:
+def decrypt_attachment_to_bytes(
+    shared_folder,
+    chat_id,
+    my_fp16,
+    my_priv_pem,
+    sender_fp16,
+    attachment_data,
+    max_size: int = MAX_FILE_SIZE,
+) -> bytes:
+    """Расшифровывает вложение в оперативную память и возвращает байты."""
+
+    from Crypto.Cipher import AES
+
+    if not isinstance(attachment_data, dict):
+        raise ValueError("Некорректные метаданные вложения")
+
+    if attachment_data.get("version") != FILE_ENCRYPTION_VERSION:
+        raise ValueError("Неподдерживаемая версия вложения")
+
+    if type(max_size) is not int or not 0 <= max_size <= MAX_FILE_SIZE:
+        raise ValueError("Некорректное ограничение размера")
+
+    stored_name = attachment_data.get("stored_name")
+
+    if not isinstance(stored_name, str) or not stored_name:
+        raise ValueError("Не указано имя файла")
+
+    if (
+        Path(stored_name).name != stored_name
+        or "/" in stored_name
+        or "\\" in stored_name
+        or stored_name in (".", "..")
+    ):
+        raise ValueError("Некорректное имя вложения")
+
+    expected_size = attachment_data.get("size")
+
+    if type(expected_size) is not int or not 0 <= expected_size <= max_size:
+        raise ValueError("Размер вложения превышает допустимый предел")
+
+    chat_type, group_key, my_full_fp = _prepare_chat_keys(
+        shared_folder,
+        chat_id,
+        my_fp16,
+        my_priv_pem,
+    )
+
+    aad = (
+        f"pygram-file-v{FILE_ENCRYPTION_VERSION}"
+        f"|chat_id={chat_id}"
+        f"|stored_name={stored_name}"
+        f"|sender={sender_fp16}"
+    ).encode("utf-8")
+
+    mode = attachment_data.get("mode")
+
+    if chat_type == "dm":
+        if mode != "rsa":
+            raise ValueError("Неверный способ шифрования личного вложения")
+
+        wrapped_keys = attachment_data.get("wrapped_keys")
+
+        if not isinstance(wrapped_keys, dict):
+            raise ValueError("Отсутствуют ключи получателей")
+
+        if my_full_fp is None:
+            raise ValueError("Не удалось определить ключ пользователя")
+
+        file_key = unwrap_key(
+            wrapped_keys,
+            my_full_fp,
+            my_priv_pem,
+        )
+
+    elif chat_type in ("group", "favorites", "admin_chat"):
+        if mode != "group":
+            raise ValueError("Неверный способ шифрования группового вложения")
+
+        if group_key is None:
+            raise ValueError("Нет ключа группы")
+
+        wrapped_key = attachment_data.get("wrapped_key")
+
+        if not isinstance(wrapped_key, dict):
+            raise ValueError("Отсутствует зашифрованный ключ файла")
+
+        file_key = unwrap_file_key_for_group(
+            wrapped_key,
+            group_key,
+            aad=aad,
+        )
+
+    else:
+        raise ValueError("Неизвестный тип чата")
+
+    nonce = from_base64(attachment_data["nonce"])
+    tag = from_base64(attachment_data["tag"])
+
+    files_dir = chat_files_dir(shared_folder, chat_id)
+    encrypted_path = files_dir / stored_name
+    logger.debug(f"ATTACHMENT LOAD PATH: {encrypted_path}")
+    logger.debug(f"ATTACHMENT EXISTS: {encrypted_path.is_file()}")
+
+    if not encrypted_path.is_file():
+        raise FileNotFoundError("Вложение не найдено на общей папке")
+
+    # Читаем не больше разрешённого размера плюс один байт:
+    # так обнаружим файл, который превышает лимит.
+    with encrypted_path.open("rb") as encrypted_file:
+        encrypted_data = encrypted_file.read(max_size + 1)
+
+    if len(encrypted_data) > max_size:
+        raise ValueError("Вложение превышает допустимый размер")
+
+    # AES-GCM вернёт открытые данные только после проверки тега.
+    cipher = AES.new(file_key, AES.MODE_GCM, nonce=nonce)
+    cipher.update(aad)
+    plaintext = cipher.decrypt_and_verify(encrypted_data, tag)
+
+    if len(plaintext) != expected_size:
+        raise ValueError("Размер расшифрованного файла не совпадает с метаданными")
+
+    return plaintext
+
+
+def _decrypt_message_file(
+    shared_folder,
+    chat_id,
+    my_fp16,
+    my_priv_pem,
+    msg_file,
+    chat_type,
+    group_key,
+    my_full_fp,
+) -> Message | None:
     try:
         container = json.loads(msg_file.read_text(encoding="utf-8"))
         sender = container["sender_fp16"]
@@ -217,7 +651,8 @@ def _decrypt_message_file(shared_folder, chat_id, my_fp16, my_priv_pem, msg_file
             if my_full_fp is None:
                 return None
             pkg = {
-                "nonce": container["nonce"], "ciphertext": container["ciphertext"],
+                "nonce": container["nonce"],
+                "ciphertext": container["ciphertext"],
                 "wrapped_keys": container["wrapped_keys"],
             }
             nonce_b = from_base64(pkg["nonce"])
@@ -257,14 +692,25 @@ def _decrypt_message_file(shared_folder, chat_id, my_fp16, my_priv_pem, msg_file
 
 
 def read_messages(shared_folder, chat_id, my_fp16, my_priv_pem) -> list[Message]:
-    chat_type, group_key, my_full_fp = _prepare_chat_keys(shared_folder, chat_id, my_fp16, my_priv_pem)
+    chat_type, group_key, my_full_fp = _prepare_chat_keys(
+        shared_folder, chat_id, my_fp16, my_priv_pem
+    )
     msg_dir = chat_message_dir(shared_folder, chat_id)
     if not msg_dir.is_dir():
         return []
 
     messages = []
     for msg_file in msg_dir.glob("*.bin"):
-        m = _decrypt_message_file(shared_folder, chat_id, my_fp16, my_priv_pem, msg_file, chat_type, group_key, my_full_fp)
+        m = _decrypt_message_file(
+            shared_folder,
+            chat_id,
+            my_fp16,
+            my_priv_pem,
+            msg_file,
+            chat_type,
+            group_key,
+            my_full_fp,
+        )
         if m is not None:
             messages.append(m)
 
@@ -272,8 +718,12 @@ def read_messages(shared_folder, chat_id, my_fp16, my_priv_pem) -> list[Message]
     return messages
 
 
-def read_new_messages(shared_folder, chat_id, my_fp16, my_priv_pem, known_msg_ids) -> list[Message]:
-    chat_type, group_key, my_full_fp = _prepare_chat_keys(shared_folder, chat_id, my_fp16, my_priv_pem)
+def read_new_messages(
+    shared_folder, chat_id, my_fp16, my_priv_pem, known_msg_ids
+) -> list[Message]:
+    chat_type, group_key, my_full_fp = _prepare_chat_keys(
+        shared_folder, chat_id, my_fp16, my_priv_pem
+    )
     msg_dir = chat_message_dir(shared_folder, chat_id)
     if not msg_dir.is_dir():
         return []
@@ -282,7 +732,16 @@ def read_new_messages(shared_folder, chat_id, my_fp16, my_priv_pem, known_msg_id
     for msg_file in msg_dir.glob("*.bin"):
         if msg_file.stem in known_msg_ids:
             continue
-        m = _decrypt_message_file(shared_folder, chat_id, my_fp16, my_priv_pem, msg_file, chat_type, group_key, my_full_fp)
+        m = _decrypt_message_file(
+            shared_folder,
+            chat_id,
+            my_fp16,
+            my_priv_pem,
+            msg_file,
+            chat_type,
+            group_key,
+            my_full_fp,
+        )
         if m is not None:
             new_msgs.append(m)
 
@@ -291,15 +750,29 @@ def read_new_messages(shared_folder, chat_id, my_fp16, my_priv_pem, known_msg_id
 
 
 def _read_single_message(shared_folder, chat_id, my_fp16, my_priv_pem, msg_file):
-    chat_type, group_key, my_full_fp = _prepare_chat_keys(shared_folder, chat_id, my_fp16, my_priv_pem)
-    return _decrypt_message_file(shared_folder, chat_id, my_fp16, my_priv_pem, msg_file, chat_type, group_key, my_full_fp)
+    chat_type, group_key, my_full_fp = _prepare_chat_keys(
+        shared_folder, chat_id, my_fp16, my_priv_pem
+    )
+    return _decrypt_message_file(
+        shared_folder,
+        chat_id,
+        my_fp16,
+        my_priv_pem,
+        msg_file,
+        chat_type,
+        group_key,
+        my_full_fp,
+    )
 
 
 # ============================================================================
 # СИНХРОНИЗАЦИЯ С ЛОКАЛЬНОЙ БД
 # ============================================================================
 
-def sync_messages_to_db(shared_folder, chat_id, my_fp16, my_priv_pem, prune_missing: bool = False):
+
+def sync_messages_to_db(
+    shared_folder, chat_id, my_fp16, my_priv_pem, prune_missing: bool = False
+):
     from src.storage.local_db import LocalDB
     from src.storage.shared_store import chat_message_dir
 
@@ -321,6 +794,8 @@ def sync_messages_to_db(shared_folder, chat_id, my_fp16, my_priv_pem, prune_miss
                 db.delete_message(mid)
                 logger.debug(f"Сообщение {mid} удалено с шары, чистим локальную БД")
 
-    new_msgs = read_new_messages(shared_folder, chat_id, my_fp16, my_priv_pem, known_ids)
+    new_msgs = read_new_messages(
+        shared_folder, chat_id, my_fp16, my_priv_pem, known_ids
+    )
     for msg in new_msgs:
         db.save_message(msg.msg_id, chat_id, msg.sender_fp16, msg.text, msg.ts)

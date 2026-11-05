@@ -4,6 +4,7 @@
 """
 
 import base64
+import os
 import hashlib
 import secrets
 import uuid
@@ -14,6 +15,7 @@ from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_OAEP
 from Crypto.Hash import SHA256
 from Crypto.Signature import pss
+from pathlib import Path
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, VerificationError, InvalidHashError
 from Crypto.Protocol.KDF import PBKDF2
@@ -198,6 +200,185 @@ def aes_decrypt(key: bytes, nonce: bytes, ciphertext: bytes, aad: bytes | None =
         ) from e
 
     return plaintext
+
+# ============================================================================
+# Шифрование файлов (AES-256-GCM, потоковая обработка)
+# ============================================================================
+
+FILE_ENCRYPTION_VERSION = 1
+FILE_CHUNK_SIZE = 1024 * 1024  # 1 МБ
+
+
+def encrypt_file_stream(
+    source_path: str | Path,
+    destination_path: str | Path,
+    aad: bytes,
+    chunk_size: int = FILE_CHUNK_SIZE,
+) -> tuple[bytes, bytes, bytes, int]:
+    """
+    Потоково шифрует файл AES-256-GCM.
+
+    Возвращает:
+        (file_key, nonce, tag, plaintext_size)
+    """
+    source = Path(source_path)
+    destination = Path(destination_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    if not source.is_file():
+        raise FileNotFoundError(source)
+
+    if source.resolve() == destination.resolve():
+        raise ValueError("Исходный и конечный файлы совпадают")
+
+    if not isinstance(aad, bytes):
+        raise TypeError("aad должен быть bytes")
+
+    if not isinstance(chunk_size, int) or chunk_size <= 0:
+        raise ValueError("chunk_size должен быть положительным числом")
+
+    file_key = generate_aes_key()
+    nonce = generate_nonce()
+
+    cipher = AES.new(file_key, AES.MODE_GCM, nonce=nonce)
+    cipher.update(aad)
+
+    temp_path = destination.with_name(
+        f".{destination.name}.{uuid.uuid4().hex}.tmp"
+    )
+
+    total_size = 0
+
+    try:
+        with source.open("rb") as src, temp_path.open("xb") as dst:
+            while True:
+                chunk = src.read(chunk_size)
+                if not chunk:
+                    break
+
+                dst.write(cipher.encrypt(chunk))
+                total_size += len(chunk)
+
+            tag = cipher.digest()
+
+        os.replace(temp_path, destination)
+
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+    return file_key, nonce, tag, total_size
+
+
+def decrypt_file_stream(
+    source_path: str | Path,
+    destination_path: str | Path,
+    file_key: bytes,
+    nonce: bytes,
+    tag: bytes,
+    aad: bytes,
+    chunk_size: int = FILE_CHUNK_SIZE,
+) -> int:
+    """
+    Потоково расшифровывает файл.
+
+    Временный файл становится конечным только после
+    успешной проверки GCM-тега.
+    """
+    source = Path(source_path)
+    destination = Path(destination_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    if not source.is_file():
+        raise FileNotFoundError(source)
+
+    if source.resolve() == destination.resolve():
+        raise ValueError("Исходный и конечный файлы совпадают")
+
+    if not isinstance(file_key, (bytes, bytearray)):
+        raise TypeError("file_key должен быть bytes")
+
+    if len(file_key) != AES_KEY_SIZE:
+        raise ValueError("Неверная длина ключа")
+
+    if not isinstance(nonce, (bytes, bytearray)) or len(nonce) != AES_NONCE_SIZE:
+        raise ValueError("Неверный nonce")
+
+    if not isinstance(tag, (bytes, bytearray)) or len(tag) != 16:
+        raise ValueError("Неверный GCM-тег")
+
+    if not isinstance(aad, bytes):
+        raise TypeError("aad должен быть bytes")
+
+    if not isinstance(chunk_size, int) or chunk_size <= 0:
+        raise ValueError("chunk_size должен быть положительным числом")
+
+    cipher = AES.new(bytes(file_key), AES.MODE_GCM, nonce=bytes(nonce))
+    cipher.update(aad)
+
+    temp_path = destination.with_name(
+        f".{destination.name}.{uuid.uuid4().hex}.tmp"
+    )
+
+    total_size = 0
+
+    try:
+        with source.open("rb") as src, temp_path.open("xb") as dst:
+            while True:
+                chunk = src.read(chunk_size)
+                if not chunk:
+                    break
+
+                dst.write(cipher.decrypt(chunk))
+                total_size += len(chunk)
+
+            # Если файл повреждён или ключ неверный,
+            # verify выбросит ValueError.
+            cipher.verify(bytes(tag))
+
+        os.replace(temp_path, destination)
+
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+    return total_size
+
+
+def wrap_file_key_for_group(
+    file_key: bytes,
+    group_key: bytes,
+    aad: bytes,
+) -> dict[str, str]:
+    """Шифрует ключ вложения общим ключом группы."""
+    nonce, ciphertext = aes_encrypt(group_key, file_key, aad=aad)
+
+    return {
+        "nonce": to_base64(nonce),
+        "ciphertext": to_base64(ciphertext),
+    }
+
+
+def unwrap_file_key_for_group(
+    package: dict,
+    group_key: bytes,
+    aad: bytes,
+) -> bytes:
+    """Расшифровывает ключ вложения ключом группы."""
+    nonce = from_base64(package["nonce"])
+    ciphertext = from_base64(package["ciphertext"])
+
+    file_key = aes_decrypt(
+        group_key,
+        nonce,
+        ciphertext,
+        aad=aad,
+    )
+
+    if len(file_key) != AES_KEY_SIZE:
+        raise ValueError("Неверная длина ключа вложения")
+
+    return file_key
 
 # ============================================================================
 # RSA-3072 (асимметричное шифрование)
