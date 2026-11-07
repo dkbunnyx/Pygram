@@ -1,13 +1,12 @@
 """Экран быстрого входа для сохраненной сессии."""
 
 from pathlib import Path
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QLineEdit,
-    QPushButton, QMessageBox
-)
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPixmap
+
 from loguru import logger
+from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+                               QPushButton, QVBoxLayout, QWidget)
 
 from src.core.user import login_user
 
@@ -26,6 +25,12 @@ class SessionView(QWidget):
         self.fp16 = session_data["fp16"]
         self._setup_ui()
 
+    def eventFilter(self, watched, event):
+        if watched is self.btn_password_eye and event.type() == QEvent.Leave:
+            self.input_password.setEchoMode(QLineEdit.Password)
+
+        return super().eventFilter(watched, event)
+
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignCenter)
@@ -43,7 +48,11 @@ class SessionView(QWidget):
         avatar_path = Path(self.shared_folder) / ".profiles" / f"{self.fp16}.png"
         if avatar_path.exists():
             pixmap = QPixmap(str(avatar_path))
-            self.avatar_label.setPixmap(pixmap.scaled(80, 80, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation))
+            self.avatar_label.setPixmap(
+                pixmap.scaled(
+                    80, 80, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+                )
+            )
             self.avatar_label.setStyleSheet("border-radius: 40px;")  # Круглая маска
         else:
             self.avatar_label.setText(self.login[0].upper())
@@ -68,7 +77,28 @@ class SessionView(QWidget):
         self.input_password.setPlaceholderText("Введите пароль")
         self.input_password.setEchoMode(QLineEdit.Password)
         self.input_password.returnPressed.connect(self._on_login_clicked)
-        form_layout.addWidget(self.input_password)
+
+        password_layout = QHBoxLayout()
+        password_layout.setSpacing(5)
+
+        self.btn_password_eye = QPushButton("👁")
+        self.btn_password_eye.setFixedWidth(42)
+        self.btn_password_eye.setCursor(Qt.PointingHandCursor)
+        self.btn_password_eye.setFocusPolicy(Qt.NoFocus)
+
+        self.btn_password_eye.pressed.connect(
+            lambda: self.input_password.setEchoMode(QLineEdit.Normal)
+        )
+        self.btn_password_eye.released.connect(
+            lambda: self.input_password.setEchoMode(QLineEdit.Password)
+        )
+
+        self.btn_password_eye.installEventFilter(self)
+
+        password_layout.addWidget(self.input_password)
+        password_layout.addWidget(self.btn_password_eye)
+
+        form_layout.addLayout(password_layout)
 
         # Кнопка входа
         self.btn_login = QPushButton("Войти")

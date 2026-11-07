@@ -13,6 +13,7 @@ from src.core.chat_logic import (
     list_user_chats,
 )
 from src.core.identity import register_identity
+from tests.conftest import bootstrap_super_admin
 from src.storage.shared_store import ensure_shared_structure
 
 
@@ -27,8 +28,7 @@ def shared(tmp_path):
 @pytest.fixture
 def users(shared):
     """Создаёт трёх пользователей: vasya (админ), petya, kolya."""
-    fp_vasya = register_identity(shared, "vasya", "Pass1!")
-    make_admin(shared, fp_vasya, by="system")
+    fp_vasya, _ = bootstrap_super_admin(shared, "vasya", "Pass1!")
     fp_petya = register_identity(shared, "petya", "Pass2!")
     fp_kolya = register_identity(shared, "kolya", "Pass3!")
     return fp_vasya, fp_petya, fp_kolya

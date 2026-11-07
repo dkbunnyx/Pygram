@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Callable
 
@@ -13,6 +12,7 @@ from loguru import logger
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+from src.storage.shared_store import write_bytes_atomic
 from src.transport.base import Transport
 from src.utils.validators import safe_join
 
@@ -52,11 +52,7 @@ class FileTransport(Transport):
 
     def put(self, path: str, data: bytes) -> None:
         target = self._abs(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-
-        tmp = target.with_suffix(target.suffix + ".tmp")
-        tmp.write_bytes(data)
-        tmp.replace(target)
+        write_bytes_atomic(target, data)
 
     def get(self, path: str) -> bytes:
         return self._abs(path).read_bytes()

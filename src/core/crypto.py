@@ -4,26 +4,26 @@
 """
 
 import base64
-import os
 import hashlib
+import os
 import secrets
 import uuid
 from functools import lru_cache
-from Crypto.Cipher import AES
-from Crypto.Random import get_random_bytes
-from Crypto.PublicKey import RSA
-from Crypto.Cipher import PKCS1_OAEP
-from Crypto.Hash import SHA256
-from Crypto.Signature import pss
 from pathlib import Path
-from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError, VerificationError, InvalidHashError
-from Crypto.Protocol.KDF import PBKDF2
 
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
+from Crypto.Cipher import AES, PKCS1_OAEP
+from Crypto.Hash import SHA256
+from Crypto.Protocol.KDF import PBKDF2
+from Crypto.PublicKey import RSA
+from Crypto.Random import get_random_bytes
+from Crypto.Signature import pss
 
 # ============================================================================
 # Утилиты: base64, hex, uuid, случайные строки
 # ============================================================================
+
 
 def to_base64(data: bytes) -> str:
     """Кодирует bytes в base64-строку (ASCII).
@@ -101,17 +101,19 @@ def generate_random_string(length: int = 32) -> str:
         raise ValueError("length должен быть чётным (hex = 2 символа на байт)")
     return secrets.token_hex(length // 2)
 
+
 # ============================================================================
 # AES-256-GCM (симметричное шифрование)
 # ============================================================================
 
-AES_KEY_SIZE = 32     # 256 бит
-AES_NONCE_SIZE = 12   # 96 бит (рекомендация NIST для GCM)
+AES_KEY_SIZE = 32  # 256 бит
+AES_NONCE_SIZE = 12  # 96 бит (рекомендация NIST для GCM)
 
 # PBKDF2 — производные ключи
-PBKDF2_ITERATIONS = 600_000   # рекомендация OWASP для PBKDF2-SHA256
-PBKDF2_SALT_SIZE = 16         # 16 байт соли
-PBKDF2_KEY_SIZE = 32          # 32 байта = AES-256
+PBKDF2_ITERATIONS = 600_000  # рекомендация OWASP для PBKDF2-SHA256
+PBKDF2_SALT_SIZE = 16  # 16 байт соли
+PBKDF2_KEY_SIZE = 32  # 32 байта = AES-256
+
 
 def generate_aes_key() -> bytes:
     """Генерирует случайный AES-256 ключ (32 байта)."""
@@ -123,7 +125,9 @@ def generate_nonce() -> bytes:
     return get_random_bytes(AES_NONCE_SIZE)
 
 
-def aes_encrypt(key: bytes, plaintext: bytes, aad: bytes | None = None) -> tuple[bytes, bytes]:
+def aes_encrypt(
+    key: bytes, plaintext: bytes, aad: bytes | None = None
+) -> tuple[bytes, bytes]:
     """Шифрует данные AES-256-GCM.
 
     Args:
@@ -156,7 +160,9 @@ def aes_encrypt(key: bytes, plaintext: bytes, aad: bytes | None = None) -> tuple
     return nonce, ciphertext + tag
 
 
-def aes_decrypt(key: bytes, nonce: bytes, ciphertext: bytes, aad: bytes | None = None) -> bytes:
+def aes_decrypt(
+    key: bytes, nonce: bytes, ciphertext: bytes, aad: bytes | None = None
+) -> bytes:
     """Расшифровывает данные AES-256-GCM.
 
     Args:
@@ -178,7 +184,9 @@ def aes_decrypt(key: bytes, nonce: bytes, ciphertext: bytes, aad: bytes | None =
     if not isinstance(nonce, (bytes, bytearray)):
         raise TypeError("nonce должен быть bytes")
     if len(nonce) != AES_NONCE_SIZE:
-        raise ValueError(f"nonce должен быть {AES_NONCE_SIZE} байт, получено {len(nonce)}")
+        raise ValueError(
+            f"nonce должен быть {AES_NONCE_SIZE} байт, получено {len(nonce)}"
+        )
     if not isinstance(ciphertext, (bytes, bytearray)):
         raise TypeError("ciphertext должен быть bytes")
     if len(ciphertext) < 16:
@@ -200,6 +208,7 @@ def aes_decrypt(key: bytes, nonce: bytes, ciphertext: bytes, aad: bytes | None =
         ) from e
 
     return plaintext
+
 
 # ============================================================================
 # Шифрование файлов (AES-256-GCM, потоковая обработка)
@@ -243,9 +252,7 @@ def encrypt_file_stream(
     cipher = AES.new(file_key, AES.MODE_GCM, nonce=nonce)
     cipher.update(aad)
 
-    temp_path = destination.with_name(
-        f".{destination.name}.{uuid.uuid4().hex}.tmp"
-    )
+    temp_path = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
 
     total_size = 0
 
@@ -259,12 +266,19 @@ def encrypt_file_stream(
                 dst.write(cipher.encrypt(chunk))
                 total_size += len(chunk)
 
+            # Завершаем шифрование только после обработки всех блоков.
             tag = cipher.digest()
+            dst.flush()
+            os.fsync(dst.fileno())
 
+        # Файлы уже закрыты.
         os.replace(temp_path, destination)
 
     except Exception:
-        temp_path.unlink(missing_ok=True)
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         raise
 
     return file_key, nonce, tag, total_size
@@ -316,9 +330,7 @@ def decrypt_file_stream(
     cipher = AES.new(bytes(file_key), AES.MODE_GCM, nonce=bytes(nonce))
     cipher.update(aad)
 
-    temp_path = destination.with_name(
-        f".{destination.name}.{uuid.uuid4().hex}.tmp"
-    )
+    temp_path = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
 
     total_size = 0
 
@@ -332,14 +344,19 @@ def decrypt_file_stream(
                 dst.write(cipher.decrypt(chunk))
                 total_size += len(chunk)
 
-            # Если файл повреждён или ключ неверный,
-            # verify выбросит ValueError.
+            # Проверяем подлинность всего файла после обработки всех блоков.
             cipher.verify(bytes(tag))
+            dst.flush()
+            os.fsync(dst.fileno())
 
+        # Только после успешной проверки и закрытия файла.
         os.replace(temp_path, destination)
 
     except Exception:
-        temp_path.unlink(missing_ok=True)
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         raise
 
     return total_size
@@ -380,11 +397,12 @@ def unwrap_file_key_for_group(
 
     return file_key
 
+
 # ============================================================================
 # RSA-3072 (асимметричное шифрование)
 # ============================================================================
 
-RSA_KEY_SIZE = 3072   # бит
+RSA_KEY_SIZE = 3072  # бит
 
 
 def generate_rsa_keypair() -> tuple[str, str]:
@@ -460,6 +478,7 @@ def fingerprint(pub_pem: str) -> str:
     digest = hashlib.sha256(canonical_pem.encode("ascii")).digest()
     return to_hex(digest)
 
+
 # ============================================================================
 # RSA-OAEP (шифрование ключей)
 # ============================================================================
@@ -522,11 +541,15 @@ def rsa_decrypt(priv_pem: str, ciphertext: bytes) -> bytes:
     try:
         return cipher.decrypt(ciphertext)
     except ValueError as e:
-        raise ValueError("RSA-OAEP расшифровка не удалась: неверный ключ или повреждены данные") from e
+        raise ValueError(
+            "RSA-OAEP расшифровка не удалась: неверный ключ или повреждены данные"
+        ) from e
+
 
 # ============================================================================
 # RSA-PSS (цифровые подписи)
 # ============================================================================
+
 
 def rsa_sign(priv_pem: str, data: bytes) -> bytes:
     """Подписывает данные приватным RSA-ключом (PSS-SHA256).
@@ -579,6 +602,7 @@ def rsa_verify(pub_pem: str, data: bytes, signature: bytes) -> bool:
     except (ValueError, TypeError):
         return False
 
+
 # ============================================================================
 # Argon2id (хеширование паролей)
 # ============================================================================
@@ -586,7 +610,7 @@ def rsa_verify(pub_pem: str, data: bytes, signature: bytes) -> bool:
 # Параметры из рекомендаций OWASP
 _ph = PasswordHasher(
     time_cost=3,
-    memory_cost=65536,   # 64 МБ
+    memory_cost=65536,  # 64 МБ
     parallelism=4,
     hash_len=32,
     salt_len=16,
@@ -652,9 +676,11 @@ def needs_rehash(password_hash: str) -> bool:
     except InvalidHashError:
         return True
 
+
 # ============================================================================
 # PBKDF2 (производные ключи)
 # ============================================================================
+
 
 def generate_salt(size: int = PBKDF2_SALT_SIZE) -> bytes:
     """Генерирует случайную соль.
@@ -704,11 +730,15 @@ def derive_key(password: str, salt: bytes) -> bytes:
     )
     return key
 
+
 # ============================================================================
 # Гибридное шифрование (AES + RSA)
 # ============================================================================
 
-def wrap_key_for_recipients(aes_key: bytes, recipients: dict[str, str]) -> dict[str, str]:
+
+def wrap_key_for_recipients(
+    aes_key: bytes, recipients: dict[str, str]
+) -> dict[str, str]:
     """Заворачивает AES-ключ для каждого получателя (RSA-OAEP).
 
     Args:
@@ -822,13 +852,15 @@ def hybrid_decrypt(
     aes_key = unwrap_key(wrapped_keys, my_fingerprint, priv_pem)
     plaintext = aes_decrypt(aes_key, nonce, ciphertext, aad)
     return plaintext
+
+
 # ============================================================================
 # Argon2id для вывода ключей (derive_key)
 # ============================================================================
 
 # Параметры OWASP 2023 для Argon2id
 ARGON2_TIME_COST = 3
-ARGON2_MEMORY_COST = 65536   # 64 МБ
+ARGON2_MEMORY_COST = 65536  # 64 МБ
 ARGON2_PARALLELISM = 4
 ARGON2_KEY_SIZE = 32
 ARGON2_SALT_SIZE = 16
@@ -872,18 +904,22 @@ def derive_key_argon2(password: str, salt: bytes) -> bytes:
         type=Type.ID,
     )
 
+
 # ============================================================================
 # ДОПОЛНИТЕЛЬНАЯ ЗАЩИТА
 # ============================================================================
 
 import hmac as _hmac
+
 from Crypto.Hash import SHA256 as _SHA256
 
 # Константа для проверки целостности AAD-схем
 _AAD_SCHEMA_VERSION = b"pygram-aad-v2"
 
 
-def make_message_aad(chat_id: str, sender_fp16: str, ts: int, msg_id: str = "") -> bytes:
+def make_message_aad(
+    chat_id: str, sender_fp16: str, ts: int, msg_id: str = ""
+) -> bytes:
     """Единая схема AAD для сообщений (v2).
 
     Включает msg_id и схему версии — защита от replay и подмены контекста.

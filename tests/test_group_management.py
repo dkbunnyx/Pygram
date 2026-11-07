@@ -10,6 +10,7 @@ from src.core.chat_logic import (
     can_edit_group_profile,
 )
 from src.core.identity import authenticate, register_identity
+from tests.conftest import bootstrap_super_admin
 from src.storage.shared_store import ensure_shared_structure
 
 
@@ -24,9 +25,7 @@ def shared(tmp_path):
 @pytest.fixture
 def group(shared):
     """Создаёт группу с 3 участниками."""
-    fp_vasya = register_identity(shared, "vasya", "Pass1!")
-    make_admin(shared, fp_vasya, by="system")
-    priv_vasya, _ = authenticate(shared, "vasya", "Pass1!")
+    fp_vasya, priv_vasya = bootstrap_super_admin(shared, "vasya", "Pass1!")
 
     fp_petya = register_identity(shared, "petya", "Pass2!")
     priv_petya, _ = authenticate(shared, "petya", "Pass2!")

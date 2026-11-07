@@ -1,28 +1,30 @@
 """Главное окно Pygram (расширенная админ-панель + конфиденциальность)."""
 
 from pathlib import Path
-from PySide6.QtWidgets import (
-    QMainWindow, QSplitter, QWidget, QVBoxLayout,
-    QPushButton, QLabel, QFrame, QDialog, QListWidget,
-    QListWidgetItem, QApplication, QMessageBox, QMenu, QTabWidget,
-)
-from PySide6.QtCore import Qt, QSize, QRectF, QTimer
-from PySide6.QtGui import QPixmap, QIcon, QPainter, QBrush
+
+from PySide6.QtCore import QRectF, QSize, Qt, QTimer
+from PySide6.QtGui import QBrush, QIcon, QPainter, QPixmap
+from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QLabel,
+                               QListWidget, QListWidgetItem, QMainWindow,
+                               QMenu, QMessageBox, QPushButton, QSplitter,
+                               QTabWidget, QVBoxLayout, QWidget)
 
 from config import get_config
-from src.ui.chat_list import ChatListWidget
-from src.ui.chat_view import ChatViewWidget
-from src.ui.settings_view import SettingsView
-from src.ui.profile_view import ProfileView
 from src.core.account_manager import AccountManager
-from src.core.admin import (
-    load_admins, load_admins_verified, is_super, is_admin, make_admin,
-    remove_admin, toggle_manage_rights, toggle_read_rights,
-    can_read_all_chats, can_manage_admins,
-)
+from src.core.admin import (can_delete_others_messages,
+                            can_grant_delete_rights, can_manage_admins,
+                            can_read_all_chats, is_admin, is_super,
+                            load_admins, load_admins_verified, make_admin,
+                            remove_admin, toggle_delete_others_rights,
+                            toggle_grant_delete_rights, toggle_manage_rights,
+                            toggle_read_rights)
 from src.core.chat_logic import get_all_users_fp16
 from src.core.status import set_online
 from src.storage.local_db import LocalDB
+from src.ui.chat_list import ChatListWidget
+from src.ui.chat_view import ChatViewWidget
+from src.ui.profile_view import ProfileView
+from src.ui.settings_view import SettingsView
 
 
 class MainWindow(QMainWindow):
@@ -37,7 +39,12 @@ class MainWindow(QMainWindow):
 
         db = LocalDB()
         hide_last_seen = db.get_setting("hide_last_seen", "0") == "1"
-        set_online(self.config.shared_folder, self.user.fp16, True, hide_last_seen=hide_last_seen)
+        set_online(
+            self.config.shared_folder,
+            self.user.fp16,
+            True,
+            hide_last_seen=hide_last_seen,
+        )
 
         self.setWindowTitle(f"Pygram - {user.login} ({user.role})")
         self.resize(1000, 650)
@@ -52,13 +59,17 @@ class MainWindow(QMainWindow):
 
         self.chat_list = ChatListWidget(
             shared_folder=self.config.shared_folder,
-            user_fp16=self.user.fp16, user_login=self.user.login,
-            user_priv_pem=self.user.priv_pem, user_is_admin=self.admin_mode,
+            user_fp16=self.user.fp16,
+            user_login=self.user.login,
+            user_priv_pem=self.user.priv_pem,
+            user_is_admin=self.admin_mode,
         )
         self.chat_list.setMinimumWidth(250)
         self.chat_list.setMaximumWidth(400)
 
-        self.chat_view = ChatViewWidget(shared_folder=self.config.shared_folder, user=self.user)
+        self.chat_view = ChatViewWidget(
+            shared_folder=self.config.shared_folder, user=self.user
+        )
         self.chat_list.chat_selected.connect(self._on_chat_selected)
 
         self.splitter.addWidget(self.sidebar)
@@ -82,6 +93,7 @@ class MainWindow(QMainWindow):
             self.chat_list.sync_all_chats()
         except Exception as e:
             from loguru import logger
+
             logger.error(f"_tick: ошибка синхронизации: {e}")
 
     def _on_chat_selected(self, chat_id: str):
@@ -93,12 +105,15 @@ class MainWindow(QMainWindow):
             all_msgs = db.get_messages(chat_id)
             my_fp16 = self.user.fp16
 
-            incoming_ids = [m["msg_id"] for m in all_msgs if m["sender_fp16"] != my_fp16]
+            incoming_ids = [
+                m["msg_id"] for m in all_msgs if m["sender_fp16"] != my_fp16
+            ]
 
             if incoming_ids:
                 db.mark_messages_read(chat_id, incoming_ids)
         except Exception as e:
             from loguru import logger
+
             logger.error(f"Ошибка при отметке прочитанных: {e}")
 
         # 2. Загружаем сам чат
@@ -111,11 +126,16 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         db = LocalDB()
         hide_last_seen = db.get_setting("hide_last_seen", "0") == "1"
-        set_online(self.config.shared_folder, self.user.fp16, False, hide_last_seen=hide_last_seen)
+        set_online(
+            self.config.shared_folder,
+            self.user.fp16,
+            False,
+            hide_last_seen=hide_last_seen,
+        )
         event.accept()
 
     def _setup_sidebar(self):
-        if not hasattr(self, 'sidebar'):
+        if not hasattr(self, "sidebar"):
             self.sidebar = QFrame()
             self.sidebar.setObjectName("sidebar")
             self.sidebar.setFixedWidth(60)
@@ -143,7 +163,9 @@ class MainWindow(QMainWindow):
             self.btn_admin.clicked.connect(self._toggle_admin_mode)
             self.sidebar_layout.addWidget(self.btn_admin)
 
-        if can_manage_admins(self.config.shared_folder, self.user.fp16):
+        if can_manage_admins(
+            self.config.shared_folder, self.user.fp16
+        ) or can_grant_delete_rights(self.config.shared_folder, self.user.fp16):
             self.btn_manage_admins = QPushButton("👑")
             self.btn_manage_admins.setFixedSize(45, 45)
             self.btn_manage_admins.setCursor(Qt.PointingHandCursor)
@@ -168,7 +190,13 @@ class MainWindow(QMainWindow):
             rounded.fill(Qt.transparent)
             painter = QPainter(rounded)
             painter.setRenderHint(QPainter.Antialiasing)
-            painter.setBrush(QBrush(pixmap.scaled(45, 45, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)))
+            painter.setBrush(
+                QBrush(
+                    pixmap.scaled(
+                        45, 45, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+                    )
+                )
+            )
             painter.setPen(Qt.NoPen)
             painter.drawEllipse(QRectF(0, 0, 45, 45))
             painter.end()
@@ -195,8 +223,17 @@ class MainWindow(QMainWindow):
             self.btn_admin.setStyleSheet("")
 
     def _open_admins_panel(self):
-        if not can_manage_admins(self.config.shared_folder, self.user.fp16):
-            QMessageBox.warning(self, "Доступ", "У вас нет прав на управление администраторами.")
+        manage_admins = can_manage_admins(self.config.shared_folder, self.user.fp16)
+        grant_delete_rights = can_grant_delete_rights(
+            self.config.shared_folder, self.user.fp16
+        )
+
+        if not manage_admins and not grant_delete_rights:
+            QMessageBox.warning(
+                self,
+                "Доступ",
+                "У вас нет прав на управление этой панелью.",
+            )
             return
 
         dialog = QDialog(self)
@@ -208,7 +245,7 @@ class MainWindow(QMainWindow):
         # ---- Вкладка 1: Администраторы ----
         tab_admins = QWidget()
         a_layout = QVBoxLayout(tab_admins)
-        a_layout.addWidget(QLabel("<b>Нажмите на пользователя для действий:</b>"))
+        a_layout.addWidget(QLabel("<b>Нажмите ЛКМ по пользователю для действий:</b>"))
 
         admins_list = QListWidget()
         admins_list.setStyleSheet("""
@@ -241,20 +278,49 @@ class MainWindow(QMainWindow):
             menu = QMenu(dialog)
             if not is_adm:
                 act = menu.addAction("Назначить администратором")
-                act.triggered.connect(lambda: self._do_promote(fp, dialog, refresh_admins))
+                act.triggered.connect(
+                    lambda: self._do_promote(fp, dialog, refresh_admins)
+                )
             elif not is_sup:
                 admins = load_admins_verified(self.config.shared_folder)
                 entry = next((a for a in admins if a["fp16"] == fp), {})
                 if is_super(self.config.shared_folder, self.user.fp16):
                     can_read = entry.get("can_read_all_chats", False)
                     can_manage = entry.get("can_manage_admins", False)
-                    act_r = menu.addAction(("❌ Запретить" if can_read else "✅ Разрешить") + " просмотр всех чатов")
-                    act_r.triggered.connect(lambda: self._toggle_read_rights(fp, dialog, refresh_admins))
-                    act_m = menu.addAction(("❌ Запретить" if can_manage else "✅ Разрешить") + " выдачу админки")
-                    act_m.triggered.connect(lambda: self._toggle_manage_rights(fp, dialog, refresh_admins))
+                    act_r = menu.addAction(
+                        ("❌ Запретить" if can_read else "✅ Разрешить")
+                        + " просмотр всех чатов"
+                    )
+                    act_r.triggered.connect(
+                        lambda: self._toggle_read_rights(fp, dialog, refresh_admins)
+                    )
+                    act_m = menu.addAction(
+                        ("❌ Запретить" if can_manage else "✅ Разрешить")
+                        + " выдачу админки"
+                    )
+                    act_m.triggered.connect(
+                        lambda: self._toggle_manage_rights(fp, dialog, refresh_admins)
+                    )
+                    menu.addSeparator()
+                    can_grant = entry.get("can_grant_delete_rights", False)
+
+                    act_g = menu.addAction(
+                        (
+                            "❌ Запретить выдачу разрешений на удаление"
+                            if can_grant
+                            else "✅ Разрешить выдачу разрешений на удаление"
+                        )
+                    )
+                    act_g.triggered.connect(
+                        lambda: self._toggle_grant_delete_rights(
+                            fp, dialog, refresh_admins
+                        )
+                    )
                     menu.addSeparator()
                 act_d = menu.addAction("⛔ Снять с админки")
-                act_d.triggered.connect(lambda: self._do_demote(fp, dialog, refresh_admins))
+                act_d.triggered.connect(
+                    lambda: self._do_demote(fp, dialog, refresh_admins)
+                )
             else:
                 menu.addAction("👑 Супер-админ — действия недоступны").setEnabled(False)
             menu.exec(dialog.mapToGlobal(dialog.cursor().pos()))
@@ -262,15 +328,15 @@ class MainWindow(QMainWindow):
         refresh_admins()
         admins_list.itemClicked.connect(on_admin_clicked)
         a_layout.addWidget(admins_list)
-        tabs.addTab(tab_admins, "🛡 Администраторы")
+        if manage_admins:
+            tabs.addTab(tab_admins, "🛡 Администраторы")
 
         # ---- Вкладка 2: Все пользователи ----
         tab_users = QWidget()
         u_layout = QVBoxLayout(tab_users)
-        u_layout.addWidget(QLabel("<b>Пользователи шары (ПКМ — действия):</b>"))
+        u_layout.addWidget(QLabel("<b>Пользователи шары (ЛКМ — действия):</b>"))
 
         users_list = QListWidget()
-        users_list.setContextMenuPolicy(Qt.CustomContextMenu)
         users_list.setStyleSheet("""
             QListWidget { background-color: #1a1a2e; border: 1px solid #313148; border-radius: 8px; }
             QListWidget::item { padding: 10px; font-size: 13px; color: #cdd6f4; }
@@ -286,34 +352,61 @@ class MainWindow(QMainWindow):
                 item.setData(Qt.UserRole, fp)
                 users_list.addItem(item)
 
-        def users_menu(pos):
-            item = users_list.itemAt(pos)
+        def on_user_clicked(item):
             if not item:
                 return
             fp = item.data(Qt.UserRole)
             db = LocalDB()
             login = db.get_login_by_fp16(fp)
             menu = QMenu(dialog)
+            if not is_admin(self.config.shared_folder, fp) and grant_delete_rights:
+                has_delete_right = can_delete_others_messages(
+                    self.config.shared_folder, fp
+                )
+
+                action_text = (
+                    "❌ Запретить удаление чужих сообщений"
+                    if has_delete_right
+                    else "✅ Разрешить удаление чужих сообщений"
+                )
+
+                act_delete = menu.addAction(action_text)
+                act_delete.triggered.connect(
+                    lambda: self._toggle_delete_others_rights(fp, dialog, refresh_users)
+                )
+
+                menu.addSeparator()
 
             act_info = menu.addAction(f"ℹ️ Инфо о {login}")
             act_info.triggered.connect(lambda: self._show_user_info(fp, login, dialog))
 
             menu.addSeparator()
             act_kick = menu.addAction(f"🚪 Завершить все сессии {login}")
-            act_kick.triggered.connect(lambda: self._force_logout_user(fp, login, dialog, refresh_users))
+            act_kick.triggered.connect(
+                lambda: self._force_logout_user(fp, login, dialog, refresh_users)
+            )
             menu.addSeparator()
 
-            if is_admin(self.config.shared_folder, fp):
-                act_demote = menu.addAction("⛔ Снять админку")
-                act_demote.triggered.connect(lambda: self._do_demote(fp, dialog, refresh_admins))
-            else:
-                act_promote = menu.addAction("🛡 Назначить админом")
-                act_promote.triggered.connect(lambda: self._do_promote(fp, dialog, refresh_admins))
+            if manage_admins:
+                if is_admin(self.config.shared_folder, fp):
+                    act_demote = menu.addAction("⛔ Снять админку")
+                    act_demote.triggered.connect(
+                        lambda: self._do_demote(fp, dialog, refresh_admins)
+                    )
+                else:
+                    act_promote = menu.addAction("🛡 Назначить админом")
+                    act_promote.triggered.connect(
+                        lambda: self._do_promote(fp, dialog, refresh_admins)
+                    )
 
-            menu.exec(users_list.mapToGlobal(pos))
+            menu.exec(
+                users_list.viewport().mapToGlobal(
+                    users_list.visualItemRect(item).center()
+                )
+            )
 
         refresh_users()
-        users_list.customContextMenuRequested.connect(users_menu)
+        users_list.itemClicked.connect(on_user_clicked)
         u_layout.addWidget(users_list)
         tabs.addTab(tab_users, "👥 Пользователи")
 
@@ -331,6 +424,7 @@ class MainWindow(QMainWindow):
         def refresh_chats():
             chats_list.clear()
             from src.core.chat_logic import list_all_chats
+
             for chat in list_all_chats(self.config.shared_folder):
                 cid = chat["chat_id"]
                 ctype = chat["type"]
@@ -356,7 +450,12 @@ class MainWindow(QMainWindow):
 
     def _do_promote(self, fp, dialog, refresh_callback):
         try:
-            make_admin(self.config.shared_folder, fp, by=self.user.fp16, by_priv=self.user.priv_pem)
+            make_admin(
+                self.config.shared_folder,
+                fp,
+                by=self.user.fp16,
+                by_priv=self.user.priv_pem,
+            )
             QMessageBox.information(dialog, "Успех", "Пользователь назначен админом")
             refresh_callback()
         except Exception as e:
@@ -364,7 +463,12 @@ class MainWindow(QMainWindow):
 
     def _do_demote(self, fp, dialog, refresh_callback):
         try:
-            remove_admin(self.config.shared_folder, fp, by=self.user.fp16, by_priv=self.user.priv_pem)
+            remove_admin(
+                self.config.shared_folder,
+                fp,
+                by=self.user.fp16,
+                by_priv=self.user.priv_pem,
+            )
             QMessageBox.information(dialog, "Успех", "Админ снят")
             refresh_callback()
         except Exception as e:
@@ -372,44 +476,110 @@ class MainWindow(QMainWindow):
 
     def _toggle_manage_rights(self, fp, dialog, refresh_callback):
         try:
-            toggle_manage_rights(self.config.shared_folder, fp, by=self.user.fp16)
+            toggle_manage_rights(
+                self.config.shared_folder,
+                fp,
+                by=self.user.fp16,
+                by_priv=self.user.priv_pem,
+            )
             QMessageBox.information(dialog, "Успех", "Права на управление изменены")
             refresh_callback()
         except Exception as e:
             QMessageBox.warning(dialog, "Ошибка", str(e))
 
+    def _toggle_grant_delete_rights(self, fp, dialog, refresh_callback):
+        try:
+            toggle_grant_delete_rights(
+                self.config.shared_folder,
+                fp,
+                by=self.user.fp16,
+                by_priv=self.user.priv_pem,
+            )
+
+            QMessageBox.information(
+                dialog,
+                "Успех",
+                "Полномочие на выдачу разрешений изменено.",
+            )
+            refresh_callback()
+
+        except Exception as e:
+            QMessageBox.warning(dialog, "Ошибка", str(e))
+
     def _toggle_read_rights(self, fp, dialog, refresh_callback):
         try:
-            toggle_read_rights(self.config.shared_folder, fp, by=self.user.fp16)
+            toggle_read_rights(
+                self.config.shared_folder,
+                fp,
+                by=self.user.fp16,
+                by_priv=self.user.priv_pem,
+            )
             QMessageBox.information(dialog, "Успех", "Права на просмотр чатов изменены")
             refresh_callback()
         except Exception as e:
             QMessageBox.warning(dialog, "Ошибка", str(e))
 
+    def _toggle_delete_others_rights(self, fp, dialog, refresh_callback):
+        try:
+            granted = toggle_delete_others_rights(
+                self.config.shared_folder,
+                fp,
+                by=self.user.fp16,
+                by_priv=self.user.priv_pem,
+            )
+
+            message = (
+                "Разрешение на удаление чужих сообщений выдано."
+                if granted
+                else "Разрешение на удаление чужих сообщений отозвано."
+            )
+
+            QMessageBox.information(dialog, "Успех", message)
+            refresh_callback()
+
+        except Exception as e:
+            QMessageBox.warning(dialog, "Ошибка", str(e))
+
     def _force_logout_user(self, fp, login, dialog, refresh_callback):
         from src.os_integration.win import get_local_dir
+
         try:
             session_path = get_local_dir() / f".session_{fp}"
             if session_path.exists():
                 session_path.unlink()
-                QMessageBox.information(dialog, "Успех", f"Сессия {login} на этом ПК завершена.")
+                QMessageBox.information(
+                    dialog, "Успех", f"Сессия {login} на этом ПК завершена."
+                )
             else:
-                QMessageBox.information(dialog, "Инфо", f"Активной сессии {login} на этом ПК не найдено.")
+                QMessageBox.information(
+                    dialog, "Инфо", f"Активной сессии {login} на этом ПК не найдено."
+                )
             refresh_callback()
         except Exception as e:
             QMessageBox.warning(dialog, "Ошибка", str(e))
 
     def _show_user_info(self, fp, login, dialog):
-        from src.storage.shared_store import load_pub_key_by_fp16
-        from src.core.status import get_status
         from src.core.crypto import fingerprint
+        from src.core.status import get_status
+        from src.storage.shared_store import load_pub_key_by_fp16
+
         try:
             pub = load_pub_key_by_fp16(self.config.shared_folder, fp)
             full_fp = fingerprint(pub)
-            status = get_status(self.config.shared_folder, fp, viewer_fp16=self.user.fp16, viewer_is_admin=True)
+            status = get_status(
+                self.config.shared_folder,
+                fp,
+                viewer_fp16=self.user.fp16,
+                viewer_is_admin=True,
+            )
             import datetime as dt
+
             last = status.get("last_seen", 0)
-            last_str = dt.datetime.fromtimestamp(last).strftime("%d.%m.%Y %H:%M") if last else "—"
+            last_str = (
+                dt.datetime.fromtimestamp(last).strftime("%d.%m.%Y %H:%M")
+                if last
+                else "—"
+            )
             is_adm = is_admin(self.config.shared_folder, fp)
             is_sup = is_super(self.config.shared_folder, fp)
 
@@ -450,6 +620,7 @@ class MainWindow(QMainWindow):
 
     def _on_add_account(self):
         from src.ui.login_view import LoginView
+
         self.login_window = LoginView()
         self.login_window.logged_in.connect(self._on_new_account_logged_in)
         self.login_window.show()
@@ -465,11 +636,21 @@ class MainWindow(QMainWindow):
     def _reload_for_user(self, user):
         db = LocalDB()
         hide_last_seen = db.get_setting("hide_last_seen", "0") == "1"
-        set_online(self.config.shared_folder, self.user.fp16, False, hide_last_seen=hide_last_seen)
+        set_online(
+            self.config.shared_folder,
+            self.user.fp16,
+            False,
+            hide_last_seen=hide_last_seen,
+        )
 
         self.user = user
         self.setWindowTitle(f"Pygram - {user.login} ({user.role})")
-        set_online(self.config.shared_folder, self.user.fp16, True, hide_last_seen=hide_last_seen)
+        set_online(
+            self.config.shared_folder,
+            self.user.fp16,
+            True,
+            hide_last_seen=hide_last_seen,
+        )
         self._setup_sidebar()
 
         # ← вместо прямых присваиваний:
@@ -502,7 +683,12 @@ class MainWindow(QMainWindow):
         self.chat_view.btn_emoji.setText(emoji_btn)
 
         hide_last_seen = db.get_setting("hide_last_seen", "0") == "1"
-        set_online(self.config.shared_folder, self.user.fp16, True, hide_last_seen=hide_last_seen)
+        set_online(
+            self.config.shared_folder,
+            self.user.fp16,
+            True,
+            hide_last_seen=hide_last_seen,
+        )
 
         theme = db.get_setting("theme", "base")
 
@@ -534,16 +720,21 @@ class MainWindow(QMainWindow):
                 QListWidget::item:selected {{ background-color: #313148; }}
             """)
 
-            self.sidebar.setStyleSheet(f"#sidebar {{ background-color: {sidebar_bg}; border-right: 1px solid #2a2a2a; }}")
+            self.sidebar.setStyleSheet(
+                f"#sidebar {{ background-color: {sidebar_bg}; border-right: 1px solid #2a2a2a; }}"
+            )
 
             for btn in self.chat_list.findChildren(QPushButton):
-                btn.setStyleSheet(f"QPushButton {{ background-color: {btn_bg}; color: {text_color}; border: 1px solid #313148; border-radius: 8px; padding: 10px; }} QPushButton:hover {{ background-color: #313148; }}")
+                btn.setStyleSheet(
+                    f"QPushButton {{ background-color: {btn_bg}; color: {text_color}; border: 1px solid #313148; border-radius: 8px; padding: 10px; }} QPushButton:hover {{ background-color: #313148; }}"
+                )
 
             self.chat_view.delegate.my_msg_bg = my_msg_bg
             self.chat_view.delegate.other_msg_bg = other_msg_bg
 
         else:
             from src.ui.theme import load_theme
+
             load_theme(QApplication.instance(), "base")
 
             self.chat_list.list_widget.setStyleSheet("")
@@ -561,7 +752,9 @@ class MainWindow(QMainWindow):
             bottom_right = self.chat_view.messages_model.index(
                 len(self.chat_view.messages_model.messages) - 1, 0
             )
-            self.chat_view.messages_model.dataChanged.emit(top_left, bottom_right, [Qt.UserRole])
+            self.chat_view.messages_model.dataChanged.emit(
+                top_left, bottom_right, [Qt.UserRole]
+            )
 
         self.chat_view._apply_chat_background()
         if self.chat_view.current_chat_id:

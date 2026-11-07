@@ -30,34 +30,17 @@ from pathlib import Path
 
 from loguru import logger
 
-from src.core.crypto import (
-    AES_KEY_SIZE,
-    aes_decrypt,
-    aes_encrypt,
-    derive_key_argon2,
-    fingerprint,
-    from_base64,
-    generate_rsa_keypair,
-    generate_salt,
-    hash_password,
-    load_private_key,
-    to_base64,
-    verify_password,
-)
-from src.storage.shared_store import (
-    ensure_shared_structure,
-    identity_path,
-    load_auth,
-    load_identity_blob,
-    load_login_marker,
-    load_pub_key,
-    login_exists,
-    save_auth,
-    save_identity_blob,
-    save_login_marker,
-    save_pub_key,
-)
-
+from src.core.crypto import (AES_KEY_SIZE, aes_decrypt, aes_encrypt,
+                             derive_key_argon2, fingerprint, from_base64,
+                             generate_rsa_keypair, generate_salt,
+                             hash_password, load_private_key, to_base64,
+                             verify_password)
+from src.storage.shared_store import (ensure_shared_structure, identity_path,
+                                      load_auth, load_identity_blob,
+                                      load_login_marker, load_pub_key,
+                                      login_exists, save_auth,
+                                      save_identity_blob, save_login_marker,
+                                      save_pub_key)
 
 IDENTITY_VERSION = 1
 KDF_ALGO = "argon2id"
@@ -67,6 +50,10 @@ KDF_PARALLELISM = 4
 KDF_SALT_SIZE = 16
 
 AAD_TEMPLATE = "fp={fp}|identity|v{version}"
+
+
+class InvalidPasswordError(ValueError):
+    """Неверный пароль при аутентификации."""
 
 
 def generate_identity(login: str, password: str) -> tuple[str, str]:
@@ -164,7 +151,7 @@ def authenticate(
         raise ValueError(f"Файл .auth/<fp16>.auth повреждён/отсутствует") from e
 
     if not verify_password(password, stored_hash):
-        raise ValueError("Неверный пароль")
+        raise InvalidPasswordError("Неверный пароль")
 
     priv_pem = _load_encrypted_priv(shared_folder, fp, password)
 
@@ -220,8 +207,12 @@ def change_password(
 
     priv_pem, fp16 = authenticate(shared_folder, login, old_password)
 
-    save_auth(shared_folder, _load_fp(shared_folder, login), hash_password(new_password))
-    _save_encrypted_priv(shared_folder, _load_fp(shared_folder, login), priv_pem, new_password)
+    save_auth(
+        shared_folder, _load_fp(shared_folder, login), hash_password(new_password)
+    )
+    _save_encrypted_priv(
+        shared_folder, _load_fp(shared_folder, login), priv_pem, new_password
+    )
 
     logger.info(f"Пароль изменён: {login}")
 

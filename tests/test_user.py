@@ -21,6 +21,7 @@ def isolate_local_dir(tmp_path, monkeypatch):
     local = tmp_path / "local"
     local.mkdir()
     monkeypatch.setattr("src.core.user.get_local_dir", lambda: local)
+    monkeypatch.setattr("src.core.login_guard.get_local_dir", lambda: local)
     return local
 
 
@@ -86,3 +87,80 @@ class TestSession:
         user = register_user(shared, "vasya", "Passw0rd!")
         text = _session_path(user.fp16).read_text(encoding="utf-8")
         assert "PRIVATE KEY" not in text
+class TestLoginGuard:
+    def test_third_wrong_password_locks_login(self, shared, monkeypatch):
+        from src.core import login_guard
+
+        current_time = [1_000_000]
+        monkeypatch.setattr(
+            login_guard.time, "time", lambda: current_time[0]
+        )
+
+        register_user(shared, "vasya", "Passw0rd!")
+
+        for _ in range(2):
+            with pytest.raises(ValueError, match="Неверный пароль"):
+                login_user(shared, "vasya", "WrongPass!")
+
+        with pytest.raises(ValueError, match="30 сек"):
+            login_user(shared, "vasya", "WrongPass!")
+
+        assert login_guard.get_lock_remaining("vasya") == 30
+
+    def test_attempts_during_lock_do_not_increment(
+        self, shared, monkeypatch
+    ):
+        from src.core import login_guard
+
+        current_time = [1_000_000]
+        monkeypatch.setattr(
+            login_guard.time, "time", lambda: current_time[0]
+        )
+
+        register_user(shared, "vasya", "Passw0rd!")
+
+        for _ in range(3):
+            try:
+                login_user(shared, "vasya", "WrongPass!")
+            except ValueError:
+                pass
+
+        with pytest.raises(ValueError, match="30 сек"):
+            login_user(shared, "vasya", "WrongPass!")
+
+        current_time[0] += 30
+
+        with pytest.raises(ValueError, match="30 сек"):
+            login_user(shared, "vasya", "WrongPass!")
+
+    def test_successful_login_resets_attempts(
+        self, shared, monkeypatch
+    ):
+        from src.core import login_guard
+
+        register_user(shared, "vasya", "Passw0rd!")
+
+        for _ in range(2):
+            with pytest.raises(ValueError):
+                login_user(shared, "vasya", "WrongPass!")
+
+        login_user(shared, "vasya", "Passw0rd!")
+
+        assert login_guard.get_lock_remaining("vasya") == 0
+
+        for _ in range(2):
+            with pytest.raises(ValueError, match="Неверный пароль"):
+                login_user(shared, "vasya", "WrongPass!")
+
+        with pytest.raises(ValueError, match="30 сек"):
+            login_user(shared, "vasya", "WrongPass!")
+
+    def test_registration_auto_login_does_not_count(
+        self, shared, isolate_local_dir
+    ):
+        from src.core import login_guard
+
+        register_user(shared, "vasya", "Passw0rd!")
+
+        assert login_guard.get_lock_remaining("vasya") == 0
+        assert not list(isolate_local_dir.glob(".login_guard_*.json"))

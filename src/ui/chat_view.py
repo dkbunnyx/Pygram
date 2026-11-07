@@ -1,72 +1,40 @@
 """Виджет окна чата Pygram (Максимальная оптимизация)."""
 
-from pathlib import Path
 import json
 import os
 import shutil
-from datetime import datetime
-from PySide6.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QDialog,
-    QListView,
-    QListWidget,
-    QListWidgetItem,
-    QLineEdit,
-    QPushButton,
-    QLabel,
-    QFileDialog,
-    QMessageBox,
-    QMenu,
-    QAbstractItemView,
-    QProgressBar,
-)
-from PySide6.QtCore import (
-    Qt,
-    QEvent,
-    QTimer,
-    QThread,
-    Signal,
-    QAbstractListModel,
-    QModelIndex,
-    QPoint,
-)
-from PySide6.QtGui import QKeySequence, QPixmap, QGuiApplication, QPainter
-from loguru import logger
 import tempfile
 import time
+import uuid
+from datetime import datetime
+from pathlib import Path
 
-from src.core.message import (
-    send_message,
-    send_file,
-    sync_messages_to_db,
-    decrypt_attachment_to_bytes,
-)
-from src.core.chat_logic import get_chat_meta, delete_group_chat, get_group_display_name
-from src.core.crypto import unwrap_key, aes_decrypt, from_base64
-from src.core.admin import can_read_all_chats
+from loguru import logger
+from PySide6.QtCore import (QAbstractListModel, QEvent, QModelIndex, QPoint,
+                            Qt, QThread, QTimer, Signal)
+from PySide6.QtGui import QGuiApplication, QKeySequence, QPainter, QPixmap
+from PySide6.QtWidgets import (QAbstractItemView, QDialog, QFileDialog,
+                               QHBoxLayout, QLabel, QLineEdit, QListView,
+                               QListWidget, QListWidgetItem, QMenu,
+                               QMessageBox, QProgressBar, QPushButton,
+                               QVBoxLayout, QWidget)
+
+from src.core.admin import can_delete_others_messages, can_read_all_chats
+from src.core.chat_logic import (delete_group_chat, get_chat_meta,
+                                 get_group_display_name)
+from src.core.crypto import aes_decrypt, from_base64, unwrap_key
+from src.core.message import (decrypt_attachment_to_bytes, send_file,
+                              send_message, sync_messages_to_db)
+from src.core.status import (DIR_STATUS, delete_message, get_deleted_messages,
+                             get_reactions, get_read_messages, get_status,
+                             mark_messages_read, set_reaction, set_typing)
 from src.storage.local_db import LocalDB
-from src.storage.shared_store import (
-    chat_files_dir,
-    chat_message_dir,
-    load_chat_keys,
-    load_chat_meta_enc,
-)
-from src.core.status import (
-    get_status,
-    set_typing,
-    mark_messages_read,
-    get_read_messages,
-    set_reaction,
-    get_reactions,
-    delete_message,
-    get_deleted_messages,
-    DIR_STATUS,
-)
+from src.storage.shared_store import (chat_files_dir, chat_message_dir,
+                                      load_chat_keys, load_chat_meta_enc,
+                                      write_bytes_atomic)
+from src.transport.file_transport import FileTransport
 from src.ui.widgets.emoji_picker import EmojiPicker
 from src.ui.widgets.message_delegate import MessageDelegate
-from src.transport.file_transport import FileTransport
 
 
 class ResizableListView(QListView):
@@ -214,46 +182,59 @@ class SendWorker(QThread):
 
 
 class DeleteWorker(QThread):
-    finished = Signal()
+    completed = Signal(list, list)
 
-    def __init__(self, shared_folder, chat_id, msg_ids, user_fp16, for_everyone, db):
+    def __init__(self, shared_folder, chat_id, actions, user_fp16):
         super().__init__()
         self.shared_folder = shared_folder
         self.chat_id = chat_id
-        self.msg_ids = msg_ids
+        self.actions = actions
         self.user_fp16 = user_fp16
-        self.for_everyone = for_everyone
-        self.db = db
 
     def run(self):
-        try:
-            from src.core.status import physically_delete_single_message
+        from src.core.status import (delete_message,
+                                     physically_delete_single_message)
 
-            for msg_id in self.msg_ids:
-                if msg_id.startswith("pending_"):
-                    continue
+        successful = []
+        failed = []
 
-                # Сначала пытаемся физически удалить файл
-                physically_delete_single_message(
-                    self.shared_folder, self.chat_id, msg_id
-                )
+        for msg_id, action in self.actions:
+            if msg_id.startswith("pending_"):
+                successful.append(msg_id)
+                continue
 
-                # Если это НЕ "удалить у всех", то еще и скрываем в статусах (на всякий случай)
-                if not self.for_everyone:
-                    from src.core.status import delete_message
-
-                    delete_message(
+            try:
+                if action == "self":
+                    result = delete_message(
                         self.shared_folder,
                         self.chat_id,
                         msg_id,
                         self.user_fp16,
                         for_everyone=False,
                     )
+                elif action == "all":
+                    result = physically_delete_single_message(
+                        self.shared_folder,
+                        self.chat_id,
+                        msg_id,
+                    )
+                else:
+                    logger.error(
+                        f"Неизвестное действие удаления для сообщения {msg_id}"
+                    )
+                    failed.append(msg_id)
+                    continue
 
-        except Exception as e:
-            logger.error(f"Ошибка фонового удаления: {e}")
-        finally:
-            self.finished.emit()
+                if result:
+                    successful.append(msg_id)
+                else:
+                    failed.append(msg_id)
+
+            except Exception:
+                logger.exception(f"Ошибка удаления сообщения {msg_id}")
+                failed.append(msg_id)
+
+        self.completed.emit(successful, failed)
 
 
 class DownloadWorker(QThread):
@@ -269,26 +250,43 @@ class DownloadWorker(QThread):
 
     def run(self):
         try:
+            self.dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+            tmp_path = self.dest_path.with_suffix(
+                self.dest_path.suffix + f".{uuid.uuid4().hex}.tmp"
+            )
+
             total_size = self.src_path.stat().st_size
             copied = 0
-            chunk_size = 1024 * 1024  # 1 МБ
+            chunk_size = 1024 * 1024
 
-            with open(self.src_path, "rb") as fsrc, open(self.dest_path, "wb") as fdst:
+            with open(self.src_path, "rb") as fsrc, open(tmp_path, "xb") as fdst:
                 while True:
                     chunk = fsrc.read(chunk_size)
                     if not chunk:
                         break
+
                     fdst.write(chunk)
                     copied += len(chunk)
-                    percent = int((copied / total_size) * 100)
+
+                    percent = int((copied / total_size) * 100) if total_size else 100
                     self.progress.emit(percent, copied, total_size)
 
+                fdst.flush()
+                os.fsync(fdst.fileno())
+
+            os.replace(tmp_path, self.dest_path)
             self.finished.emit(True, "")
+
         except Exception as e:
             logger.error(f"Ошибка скачивания: {e}")
-            if self.dest_path.exists():
-                self.dest_path.unlink(missing_ok=True)
             self.finished.emit(False, str(e))
+
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError as e:
+                logger.warning(f"Не удалось удалить временный файл {tmp_path}: {e}")
 
 
 class AttachmentPreviewWorker(QThread):
@@ -407,7 +405,7 @@ class ChatViewWidget(QWidget):
         self.loaded_offset = 0
         self.limit = 50
 
-        self._last_deleted_count = -1
+        self._last_deleted_ids = None
         self._last_file_count = -1
         self._last_reactions_hash = -1
         self._last_read_hash = -1
@@ -509,6 +507,7 @@ class ChatViewWidget(QWidget):
 
         self.messages_model = MessagesModel()
         self.messages_view = ResizableListView()
+        self.messages_view.setSpacing(0)
         self.messages_view.setModel(self.messages_model)
         self.messages_view.setStyleSheet("background-color: transparent; border: none;")
         self.messages_view.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
@@ -522,8 +521,11 @@ class ChatViewWidget(QWidget):
 
         self.messages_view.clicked.connect(self._on_message_left_click)
 
-        self.delegate = MessageDelegate()
+        self.delegate = MessageDelegate(self.messages_view)
         self.messages_view.setItemDelegate(self.delegate)
+
+        self.messages_view.setUniformItemSizes(False)
+        self.messages_view.doItemsLayout()
 
         self.messages_view.verticalScrollBar().valueChanged.connect(self._on_scroll)
 
@@ -679,7 +681,7 @@ class ChatViewWidget(QWidget):
         self.messages_model.clear()
         self.loaded_offset = 0
 
-        self._last_deleted_count = -1
+        self._last_deleted_ids = None
         self._last_file_count = -1
         self._last_reactions_hash = -1
         self._last_read_hash = -1
@@ -950,16 +952,21 @@ class ChatViewWidget(QWidget):
         # --- 1. Удалённые ---
         current_deleted = set(
             get_deleted_messages(
-                self.shared_folder, self.current_chat_id, self.user.fp16
+                self.shared_folder,
+                self.current_chat_id,
+                self.user.fp16,
             )
         )
-        if len(current_deleted) != self._last_deleted_count:
-            self._last_deleted_count = len(current_deleted)
+
+        if current_deleted != self._last_deleted_ids:
+            self._last_deleted_ids = current_deleted.copy()
+
             to_remove = [
                 m["msg_id"]
                 for m in self.messages_model.messages
                 if m["msg_id"] in current_deleted
             ]
+
             for mid in to_remove:
                 self.messages_model.remove_message_by_id(mid)
                 self.db.delete_message(mid)
@@ -981,12 +988,16 @@ class ChatViewWidget(QWidget):
                 else 0
             )
 
-            new_msgs = []
             incoming_to_mark = []
+            new_msgs = []
 
             for m in msgs:
+                if m["msg_id"] in current_deleted:
+                    continue
+
                 if m["ts"] <= last_ts_in_model:
                     continue
+
                 new_msgs.append(
                     {
                         "msg_id": m["msg_id"],
@@ -1110,42 +1121,115 @@ class ChatViewWidget(QWidget):
         if not self.selected_msg_ids:
             return
 
+        selected_ids = list(self.selected_msg_ids)
+        selected_messages = {
+            message["msg_id"]: message
+            for message in self.messages_model.messages
+            if message.get("msg_id") in self.selected_msg_ids
+        }
+
+        own_ids = set()
+        other_ids = set()
+
+        for msg_id in selected_ids:
+            message = selected_messages.get(msg_id)
+
+            if message and message.get("sender_fp16") == self.user.fp16:
+                own_ids.add(msg_id)
+            else:
+                # Если автора определить не удалось, считаем сообщение чужим.
+                other_ids.add(msg_id)
+
+        can_delete_others = False
+        if other_ids:
+            try:
+                can_delete_others = can_delete_others_messages(
+                    self.shared_folder,
+                    self.user.fp16,
+                )
+            except Exception:
+                logger.exception("Не удалось проверить право удаления чужих сообщений")
+
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle("Удаление")
-        msg_box.setText(f"Удалить {len(self.selected_msg_ids)} сообщений?")
-        btn_self = msg_box.addButton("Удалить у себя", QMessageBox.ActionRole)
-        btn_all = msg_box.addButton("Удалить у всех", QMessageBox.ActionRole)
-        btn_cancel = msg_box.addButton("Отмена", QMessageBox.RejectRole)
+        msg_box.setText(f"Удалить {len(selected_ids)} сообщений?")
+
+        if own_ids and other_ids and not can_delete_others:
+            msg_box.setInformativeText(
+                "Сообщения собеседника могут быть удалены только у вас. "
+                "Ваши сообщения можно удалить у всех."
+            )
+        elif other_ids and not own_ids and not can_delete_others:
+            msg_box.setInformativeText(
+                "Сообщения собеседника могут быть удалены только у вас."
+            )
+
+        btn_self = msg_box.addButton(
+            "Удалить у себя",
+            QMessageBox.ActionRole,
+        )
+        btn_all = msg_box.addButton(
+            "Удалить у всех",
+            QMessageBox.ActionRole,
+        )
+        btn_cancel = msg_box.addButton(
+            "Отмена",
+            QMessageBox.RejectRole,
+        )
 
         msg_box.exec()
 
-        if msg_box.clickedButton() == btn_cancel:
+        clicked = msg_box.clickedButton()
+
+        if clicked == btn_cancel:
             return
 
-        for_everyone = msg_box.clickedButton() == btn_all
+        if clicked not in (btn_self, btn_all):
+            return
 
-        # Берем КОПИЮ списка, так как при удалении из модели он может меняться
-        msgs_to_delete = list(self.selected_msg_ids)
+        actions = []
 
-        # Удаляем из локальной БД и из модели (визуально)
-        for msg_id in msgs_to_delete:
-            self.db.delete_message(msg_id)
-            self.messages_model.remove_message_by_id(msg_id)
+        for msg_id in selected_ids:
+            if clicked == btn_self:
+                action = "self"
+            elif msg_id in own_ids or can_delete_others:
+                action = "all"
+            else:
+                action = "self"
+
+            actions.append((msg_id, action))
 
         self._exit_selection_mode()
 
-        # Запускаем фоновое удаление с шары
         worker = DeleteWorker(
             self.shared_folder,
             self.current_chat_id,
-            msgs_to_delete,
+            actions,
             self.user.fp16,
-            for_everyone,
-            self.db,
         )
-        # Важно: нельзя удалять воркер из списка до его завершения
+
+        worker.completed.connect(self._on_delete_completed)
+
+        worker.finished.connect(
+            lambda w=worker: (
+                self._active_workers.remove(w) if w in self._active_workers else None
+            )
+        )
+
         self._active_workers.append(worker)
         worker.start()
+
+    def _on_delete_completed(self, successful, failed):
+        for msg_id in successful:
+            self.db.delete_message(msg_id)
+            self.messages_model.remove_message_by_id(msg_id)
+
+        if failed:
+            QMessageBox.warning(
+                self,
+                "Ошибка удаления",
+                f"Не удалось удалить {len(failed)} сообщений. " "Они остались в чате.",
+            )
 
     def _enter_selection_mode_and_select(self, msg_id):
         self._enter_selection_mode()
@@ -1407,8 +1491,9 @@ class ChatViewWidget(QWidget):
         # Изображения показываем прямо в приложении, без создания
         # незашифрованной копии на диске.
         if ext in image_extensions:
-            from PySide6.QtWidgets import QDialog, QLabel, QVBoxLayout, QSizePolicy
             from PySide6.QtGui import QPixmap
+            from PySide6.QtWidgets import (QDialog, QLabel, QSizePolicy,
+                                           QVBoxLayout)
 
             pixmap = QPixmap()
 
@@ -1472,9 +1557,7 @@ class ChatViewWidget(QWidget):
 
             dialog.destroyed.connect(
                 lambda *args, d=dialog: (
-                    self._image_viewers.remove(d)
-                    if d in self._image_viewers
-                    else None
+                    self._image_viewers.remove(d) if d in self._image_viewers else None
                 )
             )
 
@@ -1504,7 +1587,7 @@ class ChatViewWidget(QWidget):
                 save_path = default_dir / f"{stem} ({counter}){suffix}"
                 counter += 1
 
-            save_path.write_bytes(file_data)
+            write_bytes_atomic(save_path, file_data)
 
             logger.info(f"Вложение сохранено: {save_path}")
 
@@ -1596,10 +1679,10 @@ class ChatViewWidget(QWidget):
         self._show_message_menu(msg_id, self.messages_view.mapToGlobal(pos))
 
     def _save_attachment(
-            self,
-            attachment_data: dict,
-            original_name: str,
-            msg_data: dict,
+        self,
+        attachment_data: dict,
+        original_name: str,
+        msg_data: dict,
     ):
         default_dir = self.db.get_setting(
             "download_dir",
@@ -1628,7 +1711,7 @@ class ChatViewWidget(QWidget):
 
             save_path = Path(save_path)
             save_path.parent.mkdir(parents=True, exist_ok=True)
-            save_path.write_bytes(file_data)
+            write_bytes_atomic(save_path, file_data)
 
             logger.info(f"Вложение сохранено: {save_path}")
 

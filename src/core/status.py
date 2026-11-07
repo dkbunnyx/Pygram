@@ -52,6 +52,7 @@ _WRITE_RETRIES = 3
 # ПУТИ
 # ============================================================================
 
+
 def _status_file(shared_folder: Path | str, fp16: str) -> Path:
     path = Path(shared_folder) / DIR_STATUS
     path.mkdir(parents=True, exist_ok=True)
@@ -79,6 +80,7 @@ def _deleted_file(shared_folder: Path | str, chat_id: str) -> Path:
 # ============================================================================
 # БЕЗОПАСНОЕ ЧТЕНИЕ / ЗАПИСЬ
 # ============================================================================
+
 
 def _safe_read_json(path: Path, default):
     """Читает JSON. Битый/отсутствующий файл → default (не падаем)."""
@@ -130,9 +132,7 @@ def _locked_update(path: Path, default, mutator):
                 pass
 
             if time.monotonic() >= deadline:
-                logger.warning(
-                    f"Lock timeout на {lock_path}, пишу без блокировки"
-                )
+                logger.warning(f"Lock timeout на {lock_path}, пишу без блокировки")
                 break
             time.sleep(_LOCK_RETRY_DELAY)
         except OSError as e:
@@ -182,6 +182,7 @@ def _retry_write(fn, *args, **kwargs):
 # ОНЛАЙН / ПЕЧАТАЕТ / LAST_SEEN
 # ============================================================================
 
+
 def set_online(
     shared_folder: Path | str,
     fp16: str,
@@ -208,7 +209,9 @@ def set_online(
         logger.error(f"Ошибка установки статуса: {e}")
 
 
-def set_typing(shared_folder: Path | str, fp16: str, chat_id: str, typing: bool) -> None:
+def set_typing(
+    shared_folder: Path | str, fp16: str, chat_id: str, typing: bool
+) -> None:
     try:
         path = _status_file(shared_folder, fp16)
 
@@ -241,8 +244,12 @@ def get_status(
         dict с ключами: online, last_seen, typing, typing_chat, hide_last_seen, _hidden.
     """
     default = {
-        "online": False, "last_seen": 0, "typing": False,
-        "typing_chat": "", "hide_last_seen": False, "_hidden": False,
+        "online": False,
+        "last_seen": 0,
+        "typing": False,
+        "typing_chat": "",
+        "hide_last_seen": False,
+        "_hidden": False,
     }
     try:
         path = _status_file(shared_folder, fp16)
@@ -260,6 +267,7 @@ def get_status(
 # ============================================================================
 # ГАЛОЧКИ ПРОЧТЕНИЯ
 # ============================================================================
+
 
 def mark_messages_read(
     shared_folder: Path | str,
@@ -296,6 +304,7 @@ def get_read_messages(shared_folder: Path | str, chat_id: str, fp16: str) -> lis
 # РЕАКЦИИ
 # ============================================================================
 
+
 def set_reaction(
     shared_folder: Path | str,
     chat_id: str,
@@ -317,7 +326,9 @@ def set_reaction(
         logger.error(f"Ошибка установки реакции: {e}")
 
 
-def get_reactions(shared_folder: Path | str, chat_id: str, msg_id: str) -> dict[str, str]:
+def get_reactions(
+    shared_folder: Path | str, chat_id: str, msg_id: str
+) -> dict[str, str]:
     try:
         path = _reactions_file(shared_folder, chat_id, msg_id)
         data = _safe_read_json(path, {})
@@ -337,29 +348,33 @@ def get_reaction_users(
 # УДАЛЁННЫЕ СООБЩЕНИЯ
 # ============================================================================
 
+
 def delete_message(
     shared_folder: Path | str,
     chat_id: str,
     msg_id: str,
     fp16: str,
     for_everyone: bool = False,
-) -> None:
+) -> bool:
+    """Записывает отметку об удалении сообщения."""
     try:
         path = _deleted_file(shared_folder, chat_id)
 
         def mutate(data: dict) -> None:
             if for_everyone:
                 lst = data.setdefault("all", [])
-                if msg_id not in lst:
-                    lst.append(msg_id)
             else:
                 lst = data.setdefault(fp16, [])
-                if msg_id not in lst:
-                    lst.append(msg_id)
+
+            if msg_id not in lst:
+                lst.append(msg_id)
 
         _retry_write(_locked_update, path, {}, mutate)
+        return True
+
     except Exception as e:
         logger.error(f"Ошибка удаления сообщения: {e}")
+        return False
 
 
 def get_deleted_messages(
@@ -380,6 +395,7 @@ def get_deleted_messages(
 # ============================================================================
 # НЕПРОЧИТАННЫЕ
 # ============================================================================
+
 
 def get_unread_count(shared_folder: Path | str, chat_id: str, my_fp16: str) -> int:
     """Количество непрочитанных сообщений (устойчиво к битым msg_id)."""
@@ -412,8 +428,9 @@ def get_unread_count(shared_folder: Path | str, chat_id: str, my_fp16: str) -> i
 
 def physically_delete_all_messages(shared_folder: Path | str, chat_id: str) -> None:
     """Физически удаляет все файлы .bin из папки чата."""
-    from src.storage.shared_store import chat_message_dir
     import shutil
+
+    from src.storage.shared_store import chat_message_dir
 
     msg_dir = chat_message_dir(shared_folder, chat_id)
     if msg_dir.exists():
@@ -425,16 +442,22 @@ def physically_delete_all_messages(shared_folder: Path | str, chat_id: str) -> N
             logger.error(f"Ошибка физического удаления сообщений {chat_id}: {e}")
 
 
-def physically_delete_single_message(shared_folder: Path | str, chat_id: str, msg_id: str) -> None:
-    """Физически удаляет один файл .bin с шары."""
+def physically_delete_single_message(
+    shared_folder: Path | str,
+    chat_id: str,
+    msg_id: str,
+) -> bool:
+    """Физически удаляет один файл .bin с общей папки."""
     from src.storage.shared_store import chat_message_dir
 
-    msg_dir = chat_message_dir(shared_folder, chat_id)
-    file_path = msg_dir / f"{msg_id}.bin"
+    try:
+        msg_dir = chat_message_dir(shared_folder, chat_id)
+        file_path = msg_dir / f"{msg_id}.bin"
 
-    if file_path.exists():
-        try:
-            file_path.unlink()
-            logger.info(f"Сообщение {msg_id} физически удалено с шары")
-        except Exception as e:
-            logger.error(f"Ошибка удаления файла {msg_id}: {e}")
+        file_path.unlink(missing_ok=True)
+        logger.info(f"Сообщение {msg_id} физически удалено с шары")
+        return True
+
+    except Exception as e:
+        logger.error(f"Ошибка удаления файла {msg_id}: {e}")
+        return False

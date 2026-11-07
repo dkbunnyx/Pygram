@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+import src.storage.shared_store as shared_store
+from src.core.crypto import fingerprint, generate_rsa_keypair
 from src.storage.shared_store import (
     ALL_DIRS,
     auth_path,
@@ -42,6 +44,7 @@ def shared(tmp_path):
 # Структура
 # ============================================================================
 
+
 class TestStructure:
     def test_creates_all_dirs(self, shared):
         for d in ALL_DIRS:
@@ -56,13 +59,69 @@ class TestStructure:
 # Атомарная запись
 # ============================================================================
 
+
 class TestAtomicWrite:
     def test_write_bytes(self, tmp_path):
         p = tmp_path / "sub" / "file.bin"
         write_bytes_atomic(p, b"hello")
         assert p.read_bytes() == b"hello"
-        # .tmp не должен остаться
-        assert not (tmp_path / "sub" / "file.bin.tmp").exists()
+        assert list((tmp_path / "sub").glob("file.bin.*.tmp")) == []
+
+    def test_write_bytes_retries_after_replace_error(self, tmp_path, monkeypatch):
+        p = tmp_path / "file.bin"
+        original_replace = shared_store.os.replace
+        calls = 0
+
+        def flaky_replace(src, dst):
+            nonlocal calls
+            calls += 1
+
+            if calls == 1:
+                raise PermissionError("Временная блокировка файла")
+
+            return original_replace(src, dst)
+
+        monkeypatch.setattr(shared_store.os, "replace", flaky_replace)
+        monkeypatch.setattr(shared_store.time, "sleep", lambda _: None)
+
+        write_bytes_atomic(p, b"new", retries=2)
+
+        assert p.read_bytes() == b"new"
+        assert calls == 2
+        assert list(tmp_path.glob("file.bin.*.tmp")) == []
+
+    def test_write_bytes_preserves_original_after_replace_failures(
+        self, tmp_path, monkeypatch
+    ):
+        p = tmp_path / "file.bin"
+        p.write_bytes(b"old")
+
+        def failed_replace(src, dst):
+            raise PermissionError("Файл занят")
+
+        monkeypatch.setattr(shared_store.os, "replace", failed_replace)
+        monkeypatch.setattr(shared_store.time, "sleep", lambda _: None)
+
+        with pytest.raises(OSError, match="Не удалось атомарно заменить файл"):
+            write_bytes_atomic(p, b"new", retries=2)
+
+        assert p.read_bytes() == b"old"
+        assert list(tmp_path.glob("file.bin.*.tmp")) == []
+
+    def test_write_bytes_cleans_temp_after_fsync_error(self, tmp_path, monkeypatch):
+        p = tmp_path / "file.bin"
+        p.write_bytes(b"old")
+
+        def failed_fsync(fd):
+            raise OSError("Ошибка fsync")
+
+        monkeypatch.setattr(shared_store.os, "fsync", failed_fsync)
+
+        with pytest.raises(OSError, match="Ошибка fsync"):
+            write_bytes_atomic(p, b"new")
+
+        assert p.read_bytes() == b"old"
+        assert list(tmp_path.glob("file.bin.*.tmp")) == []
 
     def test_write_json(self, tmp_path):
         p = tmp_path / "data.json"
@@ -83,6 +142,7 @@ class TestAtomicWrite:
 # ============================================================================
 # Хеши / fingerprint
 # ============================================================================
+
 
 class TestHashes:
     def test_sha256_login(self):
@@ -126,6 +186,7 @@ class TestHashes:
 # .logins/
 # ============================================================================
 
+
 class TestLogins:
     def test_marker_path(self, shared):
         p = login_marker_path(shared, "vasya")
@@ -159,13 +220,36 @@ class TestLogins:
 # .keys/ .auth/ .identities/
 # ============================================================================
 
+
 class TestKeysAuthIdentity:
     def test_pub_key_round_trip(self, shared):
-        fp = "a" * 64
-        pem = "-----BEGIN PUBLIC KEY-----\ntest\n-----END PUBLIC KEY-----"
+        _, pem = generate_rsa_keypair()
+        fp = fingerprint(pem)
+
         path = save_pub_key(shared, fp, pem)
+
         assert path.is_file()
         assert load_pub_key(shared, fp) == pem
+
+    def test_pub_key_rejects_wrong_fingerprint(self, shared):
+        _, pem = generate_rsa_keypair()
+        wrong_fp = "a" * 64
+
+        with pytest.raises(ValueError):
+            save_pub_key(shared, wrong_fp, pem)
+
+    def test_pub_key_rejects_tampered_file(self, shared):
+        _, pem = generate_rsa_keypair()
+        fp = fingerprint(pem)
+
+        save_pub_key(shared, fp, pem)
+
+        path = pub_key_path(shared, fp)
+        _, another_pem = generate_rsa_keypair()
+        path.write_text(another_pem, encoding="ascii")
+
+        with pytest.raises(ValueError):
+            load_pub_key(shared, fp)
 
     def test_pub_key_missing(self, shared):
         with pytest.raises(FileNotFoundError):
@@ -195,6 +279,7 @@ class TestKeysAuthIdentity:
 # ============================================================================
 # Безопасность путей
 # ============================================================================
+
 
 class TestSecurity:
     def test_path_traversal_in_sha256(self, shared):

@@ -1,29 +1,33 @@
 """Окно профиля Pygram (с поддержкой нескольких фото)."""
 
-from pathlib import Path
+import io
 import json
 import shutil
 import uuid
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QLineEdit, QFileDialog, QMessageBox, QMenu
-)
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap, QIcon
+from pathlib import Path
+
 from loguru import logger
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QLineEdit,
+                               QMenu, QMessageBox, QPushButton, QVBoxLayout,
+                               QWidget)
 
 from src.storage.local_db import LocalDB
+from src.storage.shared_store import write_bytes_atomic, write_json_atomic
 
 
 class ProfileView(QWidget):
     """Окно профиля (свой или чужой)."""
 
-    def __init__(self, shared_folder: str | Path, user, target_fp16: str = None, parent=None):
+    def __init__(
+        self, shared_folder: str | Path, user, target_fp16: str = None, parent=None
+    ):
         super().__init__(parent)
         self.shared_folder = shared_folder
         self.user = user
         self.target_fp16 = target_fp16 or user.fp16
-        self.is_own = (self.target_fp16 == user.fp16)
+        self.is_own = self.target_fp16 == user.fp16
 
         self.setWindowTitle("Мой профиль" if self.is_own else "Профиль")
         self.resize(400, 550)
@@ -44,7 +48,9 @@ class ProfileView(QWidget):
         if self.is_own:
             self.btn_menu = QPushButton("⋮")
             self.btn_menu.setFixedSize(30, 30)
-            self.btn_menu.setStyleSheet("font-size: 20px; font-weight: bold; background: transparent; border: none;")
+            self.btn_menu.setStyleSheet(
+                "font-size: 20px; font-weight: bold; background: transparent; border: none;"
+            )
             self.btn_menu.setCursor(Qt.PointingHandCursor)
             self.btn_menu.clicked.connect(self._show_profile_menu)
             top_bar.addWidget(self.btn_menu)
@@ -85,7 +91,9 @@ class ProfileView(QWidget):
 
     def _show_profile_menu(self):
         menu = QMenu(self)
-        menu.setStyleSheet("QMenu { background-color: #313148; color: white; } QMenu::item:selected { background-color: #4a90e2; }")
+        menu.setStyleSheet(
+            "QMenu { background-color: #313148; color: white; } QMenu::item:selected { background-color: #4a90e2; }"
+        )
 
         avatar_path = self.profile_dir / f"{self.target_fp16}.png"
         has_avatar = avatar_path.exists()
@@ -120,7 +128,9 @@ class ProfileView(QWidget):
         photos_json = self.profile_dir / f"{self.target_fp16}.photos.json"
         if photos_json.exists():
             try:
-                return json.loads(photos_json.read_text(encoding="utf-8")).get("photos", [])
+                return json.loads(photos_json.read_text(encoding="utf-8")).get(
+                    "photos", []
+                )
             except Exception:
                 return []
 
@@ -133,10 +143,12 @@ class ProfileView(QWidget):
     def _save_photos_list(self, photos: list[str]):
         """Сохраняет список фото в JSON."""
         photos_json = self.profile_dir / f"{self.target_fp16}.photos.json"
-        photos_json.write_text(json.dumps({"photos": photos}), encoding="utf-8")
+        write_json_atomic(photos_json, {"photos": photos})
 
     def _on_add_photo(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Выберите фото", "", "Images (*.png *.jpg *.jpeg)")
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Выберите фото", "", "Images (*.png *.jpg *.jpeg)"
+        )
         if not file_path:
             return
 
@@ -158,13 +170,17 @@ class ProfileView(QWidget):
             self._save_photos_list(photos)
 
             self._load_profile()
-            QMessageBox.information(self, "Успех", "Фото добавлено и установлено главным")
+            QMessageBox.information(
+                self, "Успех", "Фото добавлено и установлено главным"
+            )
         except Exception as e:
             QMessageBox.warning(self, "Ошибка", f"Не удалось добавить фото: {e}")
 
     def _on_change_main_photo(self):
         """Изменяет текущее главное фото (перезаписывает <fp16>.png)."""
-        file_path, _ = QFileDialog.getOpenFileName(self, "Выберите новое главное фото", "", "Images (*.png *.jpg *.jpeg)")
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Выберите новое главное фото", "", "Images (*.png *.jpg *.jpeg)"
+        )
         if not file_path:
             return
 
@@ -182,7 +198,7 @@ class ProfileView(QWidget):
 
         main_path = self.profile_dir / f"{self.target_fp16}.png"
         if main_path.exists():
-            main_path.unlink() # Удаляем файл аватарки
+            main_path.unlink()  # Удаляем файл аватарки
 
         if not photos:
             self._load_profile()
@@ -220,8 +236,10 @@ class ProfileView(QWidget):
 
     def _on_delete_all_photos(self):
         reply = QMessageBox.question(
-            self, "Удаление", "Вы уверены, что хотите удалить ВСЕ фото?",
-            QMessageBox.Yes | QMessageBox.No
+            self,
+            "Удаление",
+            "Вы уверены, что хотите удалить ВСЕ фото?",
+            QMessageBox.Yes | QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
@@ -249,6 +267,7 @@ class ProfileView(QWidget):
     def _process_and_save_image(self, file_path: str, dest_path: Path):
         """Обрезает в круг и сохраняет."""
         from PIL import Image, ImageDraw
+
         img = Image.open(file_path).convert("RGBA")
 
         min_size = min(img.size)
@@ -265,7 +284,9 @@ class ProfileView(QWidget):
 
         output = Image.new("RGBA", (300, 300), (0, 0, 0, 0))
         output.paste(img, (0, 0), mask=mask)
-        output.save(dest_path, "PNG")
+        buffer = io.BytesIO()
+        output.save(buffer, format="PNG")
+        write_bytes_atomic(dest_path, buffer.getvalue())
 
     def _on_avatar_clicked(self, event):
         """Открывает галерею фото при клике на аватарку."""
@@ -274,6 +295,7 @@ class ProfileView(QWidget):
             return
 
         from src.ui.photo_gallery_view import PhotoGalleryView
+
         self.gallery_window = PhotoGalleryView(self.shared_folder, self.target_fp16)
         self.gallery_window.show()
 
@@ -285,7 +307,11 @@ class ProfileView(QWidget):
         avatar_path = self.profile_dir / f"{self.target_fp16}.png"
         if avatar_path.exists():
             pixmap = QPixmap(str(avatar_path))
-            self.avatar_label.setPixmap(pixmap.scaled(150, 150, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation))
+            self.avatar_label.setPixmap(
+                pixmap.scaled(
+                    150, 150, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+                )
+            )
         else:
             self.avatar_label.setText("👤")
             self.avatar_label.setStyleSheet("font-size: 80px;")
@@ -304,11 +330,15 @@ class ProfileView(QWidget):
             self.input_bio.setText(bio_text)
             self.label_name.setText(self.user.login)
         else:
-            self.label_bio.setText(bio_text or "Пользователь ничего не рассказал о себе.")
+            self.label_bio.setText(
+                bio_text or "Пользователь ничего не рассказал о себе."
+            )
             self.label_name.setText(db.get_login_by_fp16(self.target_fp16))
 
     def _on_save_bio(self):
         bio_text = self.input_bio.text().strip()
         bio_path = self.profile_dir / f"{self.target_fp16}.json"
-        bio_path.write_text(json.dumps({"bio": bio_text}), encoding="utf-8")
-        QMessageBox.information(self, "Успех", "Информация сохранена")
+        write_json_atomic(bio_path, {"bio": bio_text})
+        QMessageBox.information(
+            self, "РџСѓСЃРїРµС…", "Р РЅС„РѕСЂРјР°С†РёСЏ СЃРѕС…СЂР°РЅРµРЅР°"
+        )

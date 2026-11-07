@@ -7,6 +7,7 @@ from src.core.status import (
     mark_messages_read, get_read_messages,
     set_reaction, get_reactions,
     delete_message, get_deleted_messages,
+    physically_delete_single_message,
     get_unread_count,
 )
 from src.storage.shared_store import ensure_shared_structure, chat_message_dir
@@ -126,6 +127,41 @@ class TestDelete:
         assert "msg1" in get_deleted_messages(shared, "chat1", "a" * 16)
         assert "msg1" in get_deleted_messages(shared, "chat1", "b" * 16)
 
+    def test_delete_for_self_does_not_remove_bin(self, shared):
+        msg_dir = chat_message_dir(shared, "chat1")
+        msg_dir.mkdir(parents=True, exist_ok=True)
+
+        msg_file = msg_dir / "msg1.bin"
+        msg_file.write_text("{}")
+
+        result = delete_message(
+            shared, "chat1", "msg1", "a" * 16,
+            for_everyone=False,
+        )
+
+        assert result is True
+        assert msg_file.exists()
+
+    def test_physical_delete_removes_bin(self, shared):
+        msg_dir = chat_message_dir(shared, "chat1")
+        msg_dir.mkdir(parents=True, exist_ok=True)
+
+        msg_file = msg_dir / "msg1.bin"
+        msg_file.write_text("{}")
+
+        result = physically_delete_single_message(
+            shared, "chat1", "msg1"
+        )
+
+        assert result is True
+        assert not msg_file.exists()
+
+    def test_physical_delete_missing_file(self, shared):
+        result = physically_delete_single_message(
+            shared, "chat1", "missing"
+        )
+
+        assert result is True
 
 # ============================================================================
 # НЕПРОЧИТАННЫЕ

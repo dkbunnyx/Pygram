@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -39,7 +41,6 @@ from typing import Any
 from loguru import logger
 
 from src.utils.validators import safe_join
-
 
 # ============================================================================
 # Служебные папки в шаре
@@ -56,14 +57,22 @@ DIR_FILES = "files"
 DIR_STATUS = ".status"
 
 ALL_DIRS = [
-    DIR_LOGINS, DIR_KEYS, DIR_AUTH, DIR_IDENTITIES,
-    DIR_ADMINS, DIR_META, DIR_MESSAGE, DIR_FILES, DIR_STATUS,
+    DIR_LOGINS,
+    DIR_KEYS,
+    DIR_AUTH,
+    DIR_IDENTITIES,
+    DIR_ADMINS,
+    DIR_META,
+    DIR_MESSAGE,
+    DIR_FILES,
+    DIR_STATUS,
 ]
 
 
 # ============================================================================
 # Базовые операции
 # ============================================================================
+
 
 def ensure_shared_structure(shared_folder: Path | str) -> None:
     """Создаёт все служебные папки в шаре, если их нет.
@@ -79,58 +88,57 @@ def ensure_shared_structure(shared_folder: Path | str) -> None:
 
 
 def write_bytes_atomic(path: Path, data: bytes, retries: int = 5) -> None:
-    """Атомарная запись bytes через .tmp + os.replace.
+    """Атомарная запись bytes через временный файл и os.replace.
 
-    На SMB (сетевые папки Windows) rename/replace может падать с
-    WinError 5 (файл занят антивирусом/индексатором/другим клиентом).
-    Поэтому:
-      - .tmp с уникальным именем (UUID) — два клиента не бьются за один .tmp;
-      - retry с экспоненциальным backoff;
-      - финальный fallback — прямая запись без atomic (лучше потерять
-        атомарность, чем потерять данные).
+    Временный файл создаётся рядом с целевым, чтобы замена происходила
+    в пределах одной файловой системы.
 
-    Args:
-        path: Куда писать.
-        data: Что писать.
-        retries: Сколько попыток replace сделать до fallback.
+    При неудаче os.replace повторяет попытки с экспоненциальной задержкой.
+    Если все попытки неудачны, выбрасывает ошибку, не перезаписывая
+    исходный файл напрямую.
     """
+    if type(retries) is not int or retries < 1:
+        raise ValueError("retries должен быть положительным целым числом")
+
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Уникальный .tmp: два клиента одновременно не мешают друг другу
-    tmp = path.with_suffix(path.suffix + f".{uuid.uuid4().hex[:8]}.tmp")
+    tmp = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
 
-    tmp.write_bytes(data)
-
-    last_err: Exception | None = None
-    for attempt in range(retries):
-        try:
-            tmp.replace(path)
-            return  # успех
-        except (PermissionError, OSError) as e:
-            last_err = e
-            # На SMB WinError 5 — часто транзиентная (антивирус/индексатор)
-            delay = 0.05 * (2 ** attempt)  # 50, 100, 200, 400, 800 мс
-            logger.debug(
-                f"write_bytes_atomic: replace failed (attempt {attempt + 1}/{retries}, "
-                f"retry in {delay:.2f}s): {e}"
-            )
-            time.sleep(delay)
-            if not tmp.exists():
-                # Кто-то (антивирус?) уже удалил tmp — пересоздадим
-                tmp.write_bytes(data)
-
-    # Fallback: прямая запись. Не атомарно, но данные не потеряем.
-    logger.warning(
-        f"write_bytes_atomic: atomic replace failed after {retries} attempts "
-        f"({last_err}), falling back to direct write: {path}"
-    )
     try:
-        path.write_bytes(data)
+        # Сначала полностью записываем временный файл.
+        with tmp.open("wb") as file:
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())
+
+        last_err: OSError | None = None
+
+        for attempt in range(retries):
+            try:
+                os.replace(tmp, path)
+                return
+            except OSError as e:
+                last_err = e
+
+                if attempt + 1 < retries:
+                    delay = 0.05 * (2**attempt)
+
+                    logger.debug(
+                        f"write_bytes_atomic: replace failed "
+                        f"(attempt {attempt + 1}/{retries}, "
+                        f"retry in {delay:.2f}s): {e}"
+                    )
+                    time.sleep(delay)
+
+        raise OSError(
+            f"Не удалось атомарно заменить файл после " f"{retries} попыток: {path}"
+        ) from last_err
+
     finally:
         try:
             tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as e:
+            logger.warning(f"Не удалось удалить временный файл {tmp}: {e}")
 
 
 def write_json_atomic(path: Path, data: Any) -> None:
@@ -157,6 +165,7 @@ def read_json(path: Path) -> Any:
 # ============================================================================
 # Хеши / fingerprint
 # ============================================================================
+
 
 def sha256_login(login: str) -> str:
     """Возвращает sha256-хеш логина (hex, 64 символа).
@@ -188,6 +197,7 @@ def short_fp(fp: str, length: int = 16) -> str:
 # Пути: .logins/
 # ============================================================================
 
+
 def login_marker_path(shared_folder: Path | str, login: str) -> Path:
     """Путь к маркеру логина: .logins/<sha256(login)>"""
     h = sha256_login(login)
@@ -200,10 +210,10 @@ def login_exists(shared_folder: Path | str, login: str) -> bool:
 
 
 def save_login_marker(
-        shared_folder: Path | str,
-        login: str,
-        fp: str,
-        login_name: str | None = None,  # <--- НОВЫЙ ПАРАМЕТР
+    shared_folder: Path | str,
+    login: str,
+    fp: str,
+    login_name: str | None = None,  # <--- НОВЫЙ ПАРАМЕТР
 ) -> None:
     """Создаёт маркер логина.
 
@@ -242,6 +252,7 @@ def load_login_marker(shared_folder: Path | str, login: str) -> dict:
 # Пути: .keys/, .auth/, .identities/
 # ============================================================================
 
+
 def pub_key_path(shared_folder: Path | str, fp: str, fp_len: int = 16) -> Path:
     """Путь к публичному ключу: .keys/<fp16>.pub.pem"""
     return safe_join(shared_folder, DIR_KEYS, f"{short_fp(fp, fp_len)}.pub.pem")
@@ -261,21 +272,40 @@ def identity_path(shared_folder: Path | str, fp: str, fp_len: int = 16) -> Path:
 # Запись / чтение ключевых файлов
 # ============================================================================
 
+
 def save_pub_key(shared_folder: Path | str, fp: str, pub_pem: str) -> Path:
-    """Сохраняет публичный ключ в .keys/<fp16>.pub.pem."""
+    """Сохраняет публичный ключ только под соответствующим fingerprint."""
+    from src.core.crypto import fingerprint
+
+    if not isinstance(fp, str) or not re.fullmatch(
+        r"(?:[0-9a-fA-F]{16}|[0-9a-fA-F]{64})", fp
+    ):
+        raise ValueError("Некорректный fingerprint")
+
+    actual_fp = fingerprint(pub_pem)
+
+    if not actual_fp.lower().startswith(fp.lower()):
+        raise ValueError("Fingerprint не соответствует публичному ключу")
+
     path = pub_key_path(shared_folder, fp)
     write_bytes_atomic(path, pub_pem.encode("ascii"))
     return path
 
 
 def load_pub_key(shared_folder: Path | str, fp: str) -> str:
-    """Загружает публичный ключ.
+    """Загружает публичный ключ с проверкой полного fingerprint."""
+    from src.core.crypto import fingerprint
 
-    Raises:
-        FileNotFoundError: если ключа нет.
-    """
+    if not isinstance(fp, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", fp):
+        raise ValueError("Ожидался полный fingerprint из 64 hex-символов")
+
     path = pub_key_path(shared_folder, fp)
-    return path.read_text(encoding="ascii")
+    pub_pem = path.read_text(encoding="ascii")
+
+    if fingerprint(pub_pem).lower() != fp.lower():
+        raise ValueError("Fingerprint публичного ключа не совпадает")
+
+    return pub_pem
 
 
 def save_auth(shared_folder: Path | str, fp: str, password_hash: str) -> Path:
@@ -315,6 +345,7 @@ def load_identity_blob(shared_folder: Path | str, fp: str) -> bytes:
 # ============================================================================
 # ЧАТЫ: .meta/ и групповые ключи
 # ============================================================================
+
 
 def chat_meta_path(shared_folder: Path | str, chat_id: str) -> Path:
     """Путь к метаданным чата: .meta/<chat_id>.json"""
@@ -371,6 +402,7 @@ def load_chat_keys(shared_folder: Path | str, chat_id: str) -> dict:
 # ПАПКИ СООБЩЕНИЙ / ФАЙЛОВ
 # ============================================================================
 
+
 def chat_message_dir(shared_folder: Path | str, chat_id: str) -> Path:
     """Путь к папке сообщений: message/<chat_id>/"""
     return safe_join(shared_folder, DIR_MESSAGE, chat_id)
@@ -389,10 +421,16 @@ def ensure_chat_folders(shared_folder: Path | str, chat_id: str) -> None:
 
 
 def load_pub_key_by_fp16(shared_folder: Path | str, fp16: str) -> str:
-    """Загружает публичный ключ по короткому fp16.
+    """Загружает публичный ключ по короткому fingerprint с проверкой."""
+    from src.core.crypto import fingerprint
 
-    Raises:
-        FileNotFoundError: если ключа нет.
-    """
+    if not isinstance(fp16, str) or not re.fullmatch(r"[0-9a-fA-F]{16}", fp16):
+        raise ValueError("Некорректный короткий fingerprint")
+
     path = safe_join(shared_folder, DIR_KEYS, f"{fp16}.pub.pem")
-    return path.read_text(encoding="ascii")
+    pub_pem = path.read_text(encoding="ascii")
+
+    if not fingerprint(pub_pem).lower().startswith(fp16.lower()):
+        raise ValueError("Fingerprint публичного ключа не совпадает")
+
+    return pub_pem

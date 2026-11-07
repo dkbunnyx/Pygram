@@ -10,6 +10,7 @@ from src.core.chat_logic import (
 )
 from src.core.crypto import generate_rsa_keypair
 from src.core.identity import authenticate, register_identity
+from tests.conftest import bootstrap_super_admin
 from src.core.message import (
     send_message, read_messages, read_new_messages, send_file,
     Message, _build_msg_id,
@@ -30,9 +31,7 @@ def shared(tmp_path):
 @pytest.fixture
 def users(shared):
     """vasya (админ), petya, kolya."""
-    fp_vasya = register_identity(shared, "vasya", "Pass1!")
-    make_admin(shared, fp_vasya, by="system")
-    priv_vasya, _ = authenticate(shared, "vasya", "Pass1!")
+    fp_vasya, priv_vasya = bootstrap_super_admin(shared, "vasya", "Pass1!")
 
     fp_petya = register_identity(shared, "petya", "Pass2!")
     priv_petya, _ = authenticate(shared, "petya", "Pass2!")

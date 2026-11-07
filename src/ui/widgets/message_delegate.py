@@ -33,7 +33,24 @@ class MessageDelegate(QStyledItemDelegate):
         self.attachment_previews = {}
         self.attachment_preview_pending = set()
         self.attachment_preview_errors = set()
+    def _refresh_message_geometry(self, msg_id: str):
+        view = self.parent()
+        if not view:
+            return
 
+        model = view.model()
+        if not model:
+            return
+
+        for row in range(model.rowCount()):
+            index = model.index(row, 0)
+            msg_data = index.data(Qt.UserRole)
+
+            if msg_data and msg_data.get("msg_id") == msg_id:
+                self.sizeHintChanged.emit(index)
+                view.doItemsLayout()
+                view.viewport().update()
+                return
     def set_attachment_preview(self, msg_id: str, image_data: bytes):
         """Сохраняет расшифрованное превью в памяти."""
         pixmap = QPixmap()
@@ -41,15 +58,14 @@ class MessageDelegate(QStyledItemDelegate):
         if not pixmap.loadFromData(image_data):
             self.attachment_preview_pending.discard(msg_id)
             self.attachment_preview_errors.add(msg_id)
-            self.parent().viewport().update()
+            self._refresh_message_geometry(msg_id)
             return
 
         self.attachment_previews[msg_id] = pixmap
         self.attachment_preview_pending.discard(msg_id)
         self.attachment_preview_errors.discard(msg_id)
 
-        if self.parent():
-            self.parent().viewport().update()
+        self._refresh_message_geometry(msg_id)
 
     def set_attachment_preview_error(self, msg_id: str):
         """Отмечает, что превью не удалось загрузить."""
@@ -383,5 +399,7 @@ class MessageDelegate(QStyledItemDelegate):
         date_header = self._get_date_header(index)
         date_header_height = 30 if date_header else 0
 
-        height += header_height + date_header_height + 10
+        # Оставляем небольшой промежуток после пузырька.
+        # Высоту разделителя даты не меняем.
+        height += header_height + date_header_height + 3
         return QSize(option.rect.width(), int(height))
