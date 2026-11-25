@@ -36,7 +36,13 @@ class User:
         return "admin" if self.is_admin else "user"
 
 
-def register_user(shared_folder: Path | str, login: str, password: str) -> User:
+def register_user(
+    shared_folder: Path | str,
+    login: str,
+    password: str,
+    *,
+    recovery_password: str | None = None,
+) -> User:
     fp16 = register_identity(shared_folder, login, password)
 
     if not has_any_admin(shared_folder):
@@ -51,8 +57,22 @@ def register_user(shared_folder: Path | str, login: str, password: str) -> User:
             by_priv=priv_pem,
             bootstrap=True,
         )
-        # На первом компьютере отпечаток закрепляется сразу после bootstrap.
-        pin_initial_root(shared_folder, fp16)
+        # Ключ восстановления создаётся только при первичной настройке root.
+        recovery_public_key = None
+        if recovery_password is not None:
+            from src.core.superadmin_recovery import (
+                create_recovery_material,
+                save_recovery_files,
+                sign_recovery_descriptor,
+            )
+            package, recovery_public_key, descriptor_unsigned = (
+                create_recovery_material(recovery_password)
+            )
+            descriptor = sign_recovery_descriptor(descriptor_unsigned, priv_pem)
+            save_recovery_files(shared_folder, package, descriptor)
+
+        # На первом компьютере закрепляются оба корня доверия.
+        pin_initial_root(shared_folder, fp16, recovery_public_key)
         logger.info(f"Первый пользователь {login} назначен супер-админом")
 
     # --- СОЗДАЕМ ИЗБРАННОЕ ---

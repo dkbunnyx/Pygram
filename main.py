@@ -11,12 +11,16 @@ from src.ui.theme import load_theme
 from src.ui.login_view import LoginView
 from src.ui.main_window import MainWindow
 from src.ui.session_view import SessionView
+from src.core.event_engine import EventEngine
 
 
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Pygram")
     app.setApplicationDisplayName("Pygram")
+
+    # Единое событийное ядро приложения
+    event_engine = EventEngine()
 
     # 1. Проверка .env
     env_path = get_app_dir() / ".env"
@@ -71,7 +75,7 @@ def main():
                 pass
 
     def on_logged_in(user) -> None:
-        main_win = MainWindow(user)
+        main_win = MainWindow(user, event_engine)
         _replace_window(main_win)
 
     def show_login() -> None:

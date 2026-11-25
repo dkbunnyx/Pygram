@@ -11,6 +11,7 @@ from PySide6.QtGui import QPixmap
 from loguru import logger
 
 from src.storage.local_db import LocalDB
+from src.core.qt_signal_bridge import QtSignalBridge
 from src.core.crypto import unwrap_key, aes_encrypt, to_base64, from_base64, aes_decrypt
 from src.storage.shared_store import load_chat_keys, load_chat_meta_enc, save_chat_meta_enc
 from src.core.chat_logic import (
@@ -20,11 +21,20 @@ from src.core.chat_logic import (
 
 
 class GroupSettingsView(QWidget):
-    def __init__(self, shared_folder: str | Path, user, chat_id: str, parent=None):
+    def __init__(
+        self,
+        shared_folder: str | Path,
+        user,
+        chat_id: str,
+        parent=None,
+        *,
+        event_bridge: QtSignalBridge | None = None,
+    ):
         super().__init__(parent)
         self.shared_folder = shared_folder
         self.user = user
         self.chat_id = chat_id
+        self.event_bridge = event_bridge
         self.is_creator = False
 
         self.setWindowTitle("Настройки группы")
@@ -33,9 +43,12 @@ class GroupSettingsView(QWidget):
 
         self._load_meta()
         self._setup_ui()
+        if self.event_bridge is not None:
+            self.event_bridge.event_received.connect(self._on_engine_event)
 
     def _load_meta(self):
         self.meta = {}
+        self.is_creator = False
         try:
             keys = load_chat_keys(self.shared_folder, self.chat_id)
             wrapped = keys.get("wrapped", {})
@@ -119,18 +132,7 @@ class GroupSettingsView(QWidget):
             }
         """)
 
-        db = LocalDB()
-        members = self.meta.get("members", [])
-        admins = self.meta.get("admins", [])
-
-        for m in members:
-            login = db.get_login_by_fp16(m)
-            role = " (Админ)" if m in admins else ""
-            if m == self.user.fp16:
-                role += " (Вы)"
-            item = QListWidgetItem(f"{login}{role}")
-            item.setData(Qt.UserRole, m)
-            self.list_widget.addItem(item)
+        self._populate_members()
 
         self.list_widget.itemClicked.connect(self._on_member_clicked)
         self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -145,6 +147,48 @@ class GroupSettingsView(QWidget):
             btn_delete_group.setStyleSheet("background-color: #f38ba8; color: white; font-weight: bold; padding: 10px;")
             btn_delete_group.clicked.connect(self._on_delete_group)
             layout.addWidget(btn_delete_group)
+
+    def _populate_members(self) -> None:
+        if not hasattr(self, "list_widget"):
+            return
+        self.list_widget.clear()
+        db = LocalDB()
+        members = self.meta.get("members", [])
+        admins = self.meta.get("admins", [])
+        for member_fp16 in members:
+            login = db.get_login_by_fp16(member_fp16)
+            role = " (Админ)" if member_fp16 in admins else ""
+            if member_fp16 == self.user.fp16:
+                role += " (Вы)"
+            item = QListWidgetItem(f"{login}{role}")
+            item.setData(Qt.UserRole, member_fp16)
+            self.list_widget.addItem(item)
+
+    def _on_engine_event(self, event) -> None:
+        event_type = getattr(event, "event_type", "")
+        if event_type not in {
+            "file.created", "file.modified", "file.moved", "file.deleted"
+        }:
+            return
+        path = str(event.payload.get("path", "")).replace("\\", "/")
+        if not path.startswith(f".meta/{self.chat_id}."):
+            return
+
+        self._load_meta()
+        if self.user.fp16 not in self.meta.get("members", []):
+            self.close()
+            return
+
+        self.label_name.setText(self.meta.get("name", "Группа"))
+        self._populate_members()
+
+    def closeEvent(self, event) -> None:
+        if self.event_bridge is not None:
+            try:
+                self.event_bridge.event_received.disconnect(self._on_engine_event)
+            except (RuntimeError, TypeError):
+                pass
+        event.accept()
 
     def _on_delete_group(self):
         reply = QMessageBox.question(

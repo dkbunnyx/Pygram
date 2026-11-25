@@ -19,7 +19,11 @@ from src.core.crypto import (fingerprint, generate_rsa_keypair, rsa_sign,
 from src.core.trust import (TrustError, _read_pin, _write_pin,
                             admin_signature_payload, ensure_trusted_root,
                             pin_initial_root, require_trusted_root, trust_path)
-from src.storage.shared_store import ensure_shared_structure, save_pub_key
+from src.storage.shared_store import (
+    ensure_shared_structure,
+    load_pub_key_by_fp16,
+    save_pub_key,
+)
 
 
 @pytest.mark.parametrize(
@@ -625,3 +629,18 @@ def test_tampered_delete_right_signature_is_rejected(shared, local_dir):
 
     with pytest.raises(ValueError):
         can_delete_others_messages(shared, user_fp)
+
+
+def test_v2_admin_signature_covers_delete_grant_permission(shared, local_dir):
+    root_fp, root_priv, _ = _bootstrap(shared)
+    admin_priv, admin_pub = generate_rsa_keypair()
+    admin_fp = fingerprint(admin_pub)[:16]
+    _add_admin(shared, root_fp, root_priv, admin_fp, admin_pub)
+
+    data = json.loads((shared / ".admins" / "list.json").read_text(encoding="utf-8"))
+    entry = next(item for item in data["admins"] if item["fp16"] == admin_fp)
+    assert entry["signature_version"] == 2
+    entry["can_grant_delete_rights"] = not entry["can_grant_delete_rights"]
+
+    from src.core.admin import verify_signature
+    assert verify_signature(entry, load_pub_key_by_fp16(shared, root_fp)) is False

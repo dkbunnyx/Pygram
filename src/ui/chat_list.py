@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QListWidget,
     QListWidgetItem, QPushButton, QInputDialog, QMessageBox
 )
-from PySide6.QtCore import Qt, Signal, QSize, QThread
+from PySide6.QtCore import Qt, Signal, QSize, QThread, QTimer
 from PySide6.QtGui import QColor, QIcon, QPixmap
 from loguru import logger
 
@@ -19,6 +19,7 @@ from src.core.chat_logic import (
 from src.core.message import sync_messages_to_db
 from src.storage.local_db import LocalDB
 from src.storage.shared_store import load_chat_keys, load_chat_meta_enc
+from src.core.sync_engine import SyncEngine
 from src.os_integration.notifications import show_notification
 
 
@@ -79,6 +80,8 @@ class ChatListWidget(QWidget):
         user_priv_pem: str = "",
         user_is_admin: bool = False,
         parent=None,
+        *,
+        sync_engine: SyncEngine | None = None,
     ):
         super().__init__(parent)
         self.shared_folder = shared_folder
@@ -86,6 +89,11 @@ class ChatListWidget(QWidget):
         self.user_login = user_login
         self.user_priv_pem = user_priv_pem
         self.user_is_admin = user_is_admin
+        self.sync_engine = sync_engine
+        self._sync_refresh_pending = False
+        self._central_sync_pending: set[str] = set()
+        if self.sync_engine is not None:
+            self.sync_engine.sync_finished.connect(self._on_central_sync_finished)
         self.profile_dir = Path(shared_folder) / ".profiles"
         self._last_unread: dict[str, int] = {}
         self.db = LocalDB()
@@ -134,10 +142,30 @@ class ChatListWidget(QWidget):
     # ========================================================================
 
     def sync_all_chats(self) -> None:
-        """Запускает фоновую синхронизацию всех чатов пользователя.
+        """Запрашивает резервную синхронизацию всех чатов.
 
-        Если синхронизация уже идёт — второй запуск игнорируется.
+        В основном режиме задачи проходят через общий SyncEngine. Старый
+        SyncAllWorker оставлен как совместимый fallback для отдельных мест,
+        где ChatListWidget создаётся без центрального движка.
         """
+        if self.sync_engine is not None:
+            try:
+                chats = list_user_chats(self.shared_folder, self.user_fp16)
+                chat_ids = {chat["chat_id"] for chat in chats}
+                self._central_sync_pending.update(chat_ids)
+                self._sync_in_progress = bool(self._central_sync_pending)
+                for chat in chats:
+                    self.sync_engine.request_sync(
+                        self.shared_folder,
+                        chat["chat_id"],
+                        self.user_fp16,
+                        self.user_priv_pem,
+                        coalesce=False,
+                    )
+            except Exception:
+                logger.exception("ChatList: не удалось запросить синхронизацию чатов")
+            return
+
         if self._sync_all_worker and self._sync_all_worker.isRunning():
             logger.debug(f"[pid={os.getpid()}] sync_all_chats: уже идёт, пропуск")
             return
@@ -150,6 +178,20 @@ class ChatListWidget(QWidget):
         )
         self._sync_all_worker.finished.connect(self._on_sync_all_finished)
         self._sync_all_worker.start()
+
+    def _on_central_sync_finished(self, chat_id: str, success: bool) -> None:
+        """Обновляет список после фоновой синхронизации с debounce."""
+        self._central_sync_pending.discard(chat_id)
+        if not self._central_sync_pending:
+            self._sync_in_progress = False
+        if self._sync_refresh_pending:
+            return
+        self._sync_refresh_pending = True
+        QTimer.singleShot(250, self._refresh_after_central_sync)
+
+    def _refresh_after_central_sync(self) -> None:
+        self._sync_refresh_pending = False
+        self.refresh_chats()
 
     def _on_sync_all_finished(self) -> None:
         self._sync_in_progress = False

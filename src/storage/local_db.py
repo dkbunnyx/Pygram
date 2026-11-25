@@ -160,6 +160,20 @@ class LocalDB:
         conn.executemany("INSERT OR IGNORE INTO read_messages (chat_id, msg_id) VALUES (?, ?)", data)
         conn.commit()
 
+    def mark_incoming_messages_read(self, chat_id: str, my_fp16: str):
+        """Помечает все входящие сообщения чата прочитанными локально."""
+        conn = self._get_conn()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO read_messages (chat_id, msg_id)
+            SELECT chat_id, msg_id
+            FROM messages
+            WHERE chat_id = ? AND sender_fp16 != ?
+            """,
+            (chat_id, my_fp16),
+        )
+        conn.commit()
+
     def get_read_messages(self, chat_id: str) -> set[str]:
         """Возвращает множество прочитанных msg_id для чата."""
         conn = self._get_conn()

@@ -25,12 +25,22 @@ from src.ui.chat_list import ChatListWidget
 from src.ui.chat_view import ChatViewWidget
 from src.ui.profile_view import ProfileView
 from src.ui.settings_view import SettingsView
+from src.core.event_engine import EventEngine
+from src.core.qt_signal_bridge import QtSignalBridge
+from src.core.sync_engine import SyncEngine
+from src.core.tick_engine import TickEngine
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, user):
+    def __init__(self, user, event_engine: EventEngine):
         super().__init__()
         self.user = user
+        self.event_engine = event_engine
+        self.event_bridge = QtSignalBridge(event_engine, self)
+        self.tick_engine = TickEngine(self)
+        self.sync_engine = SyncEngine(self, event_engine=event_engine)
+        self._chat_list_refresh_pending = False
+        self.event_bridge.event_received.connect(self._on_engine_event)
         self.config = get_config()
         self.admin_mode = False
 
@@ -63,12 +73,18 @@ class MainWindow(QMainWindow):
             user_login=self.user.login,
             user_priv_pem=self.user.priv_pem,
             user_is_admin=self.admin_mode,
+            sync_engine=self.sync_engine,
         )
         self.chat_list.setMinimumWidth(250)
         self.chat_list.setMaximumWidth(400)
 
         self.chat_view = ChatViewWidget(
-            shared_folder=self.config.shared_folder, user=self.user
+            shared_folder=self.config.shared_folder,
+            user=self.user,
+            event_engine=self.event_engine,
+            event_bridge=self.event_bridge,
+            tick_engine=self.tick_engine,
+            sync_engine=self.sync_engine,
         )
         self.chat_list.chat_selected.connect(self._on_chat_selected)
 
@@ -83,9 +99,28 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         self._on_settings_saved()
 
-        self.notification_timer = QTimer(self)
-        self.notification_timer.timeout.connect(self._tick)
-        self.notification_timer.start(3000)
+        # Сверка списка чатов остаётся резервной задачей Tick Engine.
+        self.tick_engine.register(
+            "main_window:chat_list_sync",
+            self._tick,
+            3000,
+            immediate=True,
+        )
+
+    def _on_engine_event(self, event) -> None:
+        """Обновляет список чатов при изменении метаданных на общей папке."""
+        path = str(getattr(event, "payload", {}).get("path", ""))
+        if not path.replace("\\", "/").startswith(".meta/"):
+            return
+        if self._chat_list_refresh_pending:
+            return
+        self._chat_list_refresh_pending = True
+        QTimer.singleShot(0, self._refresh_chat_list_after_metadata_change)
+
+    def _refresh_chat_list_after_metadata_change(self) -> None:
+        self._chat_list_refresh_pending = False
+        if hasattr(self, "chat_list"):
+            self.chat_list.refresh_chats()
 
     def _tick(self):
         """Периодический тик: фоновая синхронизация всех чатов."""
@@ -97,33 +132,26 @@ class MainWindow(QMainWindow):
             logger.error(f"_tick: ошибка синхронизации: {e}")
 
     def _on_chat_selected(self, chat_id: str):
-        # 1. Помечаем сообщения прочитанными ТОЛЬКО в локальной БД —
-        #    для счётчика. Запись в шару (для галочек у отправителя)
-        #    сделает chat_view._load_page() через mark_messages_read().
-        try:
-            db = LocalDB()
-            all_msgs = db.get_messages(chat_id)
-            my_fp16 = self.user.fp16
-
-            incoming_ids = [
-                m["msg_id"] for m in all_msgs if m["sender_fp16"] != my_fp16
-            ]
-
-            if incoming_ids:
-                db.mark_messages_read(chat_id, incoming_ids)
-        except Exception as e:
-            from loguru import logger
-
-            logger.error(f"Ошибка при отметке прочитанных: {e}")
-
-        # 2. Загружаем сам чат
         self.chat_view.load_chat(chat_id)
         self.chat_list.current_open_chat_id = chat_id
-
-        # 3. Обновляем список чатов (счётчик уже не покажется)
         self.chat_list.refresh_chats()
 
     def closeEvent(self, event):
+        # Не уничтожаем QObject, пока принадлежащие ему QThread ещё работают.
+        if not self.sync_engine.shutdown(timeout_ms=30000):
+            from loguru import logger
+            logger.warning("SyncEngine ещё выполняет задачу; закрытие отложено")
+            event.ignore()
+            return
+        if not self.chat_view.shutdown(timeout_ms=10000):
+            from loguru import logger
+            logger.warning("ChatView ещё выполняет фоновую задачу; закрытие отложено")
+            self.sync_engine.resume()
+            event.ignore()
+            return
+
+        self.tick_engine.stop()
+        self.event_bridge.shutdown()
         db = LocalDB()
         hide_last_seen = db.get_setting("hide_last_seen", "0") == "1"
         set_online(

@@ -6,11 +6,19 @@ from loguru import logger
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QMessageBox
+    QLineEdit, QPushButton, QMessageBox, QInputDialog
 )
 
 from config import get_config
-from src.core.trust import ensure_trusted_root, get_root_candidate
+from src.core.trust import (
+    ensure_trusted_root, get_root_candidate, _read_pin,
+    root_account_available,
+)
+from src.core.superadmin_recovery import (
+    recover_superadmin, setup_recovery_for_current_root,
+    refresh_recovery_descriptor_for_current_root,
+)
+from src.core.admin import is_super
 from src.core.user import login_user, register_user
 from src.utils.validators import validate_login, validate_password
 
@@ -92,8 +100,14 @@ class LoginView(QWidget):
         self.btn_register.clicked.connect(self._on_register_clicked)
         form_layout.addWidget(self.btn_register)
 
+        self.btn_recovery = QPushButton("Восстановление супер-администратора")
+        self.btn_recovery.setCursor(Qt.PointingHandCursor)
+        self.btn_recovery.clicked.connect(self._on_recovery_clicked)
+        self.btn_recovery.setVisible(False)
+        form_layout.addWidget(self.btn_recovery)
+
         layout.addLayout(form_layout)
-        self.setFixedSize(400, 450)
+        self.setFixedSize(400, 490)
 
     def _confirm_root_fingerprint(self, fingerprint: str) -> bool:
         grouped = " ".join(
@@ -121,9 +135,24 @@ class LoginView(QWidget):
                 shared_folder, self._confirm_root_fingerprint
             )
             self._first_computer_bootstrap = candidate is None
+            pin = _read_pin()
+            self.btn_recovery.setVisible(
+                bool(
+                    candidate is not None
+                    and pin
+                    and pin.get("recovery_public_key")
+                    and not root_account_available(shared_folder, candidate)
+                )
+            )
+            self._current_root_fp16 = candidate["fp16"] if candidate else None
             return True
         except Exception as e:
             self._show_error(str(e))
+            try:
+                pin = _read_pin()
+                self.btn_recovery.setVisible(bool(pin and pin.get("recovery_public_key")))
+            except Exception:
+                self.btn_recovery.setVisible(False)
             logger.warning(f"Проверка корня доверия не пройдена: {e}")
             return False
 
@@ -173,14 +202,140 @@ class LoginView(QWidget):
         try:
             user = login_user(shared_folder, login, password)
             logger.info(f"Успешный вход: {login}")
+            self._maybe_setup_recovery(shared_folder, user)
             self.logged_in.emit(user)
         except FileNotFoundError:
             self._show_error("Пользователь не найден")
         except ValueError as e:
             self._show_error(str(e))
+            try:
+                from src.storage.shared_store import load_login_marker
+                marker = load_login_marker(shared_folder, login)
+                pin = _read_pin()
+                if (
+                    pin and pin.get("recovery_public_key")
+                    and marker.get("fp", "").lower().startswith(pin["fp16"])
+                ):
+                    self.btn_recovery.setVisible(True)
+            except Exception:
+                pass
         except Exception as e:
             self._show_error("Ошибка сервера")
             logger.exception(e)
+
+    def _maybe_setup_recovery(self, shared_folder: str, user) -> None:
+        """Предлагает настроить recovery на уже существующей установке Pygram."""
+        try:
+            pin = _read_pin()
+            if not is_super(shared_folder, user.fp16):
+                return
+            if pin and pin.get("recovery_public_key"):
+                refresh_recovery_descriptor_for_current_root(
+                    shared_folder, user.fp16, user.priv_pem
+                )
+                return
+        except Exception as exc:
+            logger.warning(f"Не удалось проверить настройку recovery: {exc}")
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Настройка восстановления супер-администратора",
+            "Для этого супер-администратора ещё не настроено восстановление. "
+            "Создать отдельный пароль восстановления сейчас?\n\n"
+            "Без него восстановить супер-администратора после потери аккаунта будет нельзя.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        recovery_password, ok = QInputDialog.getText(
+            self,
+            "Создание пароля восстановления",
+            "Введите отдельный пароль восстановления (минимум 12 символов):",
+            QLineEdit.Password,
+        )
+        if not ok:
+            return
+        if len(recovery_password) < 12:
+            QMessageBox.warning(
+                self, "Слишком короткий пароль",
+                "Пароль восстановления должен содержать минимум 12 символов.",
+            )
+            return
+        confirmation, ok = QInputDialog.getText(
+            self,
+            "Подтверждение пароля восстановления",
+            "Повторите пароль восстановления:",
+            QLineEdit.Password,
+        )
+        if not ok:
+            return
+        if confirmation != recovery_password:
+            QMessageBox.warning(
+                self, "Пароли не совпадают",
+                "Пароли восстановления не совпадают. Настройка не выполнена.",
+            )
+            return
+        try:
+            setup_recovery_for_current_root(
+                shared_folder, user.fp16, user.priv_pem, recovery_password
+            )
+            QMessageBox.information(
+                self,
+                "Восстановление настроено",
+                "Ключ восстановления создан и закреплён на этом компьютере. "
+                "Обязательно сохраните пароль восстановления отдельно от пароля аккаунта.",
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Ошибка настройки восстановления", str(exc))
+            logger.exception("Не удалось настроить recovery для существующего root")
+
+    def _on_recovery_clicked(self):
+        self._clear_error()
+        login = self.input_login.text().strip()
+        account_password = self.input_password.text()
+        if not login or not account_password:
+            self._show_error(
+                "Введи логин и пароль нового аккаунта в соответствующие поля, "
+                "затем запусти восстановление."
+            )
+            return
+        if not self._validate_inputs(login, account_password):
+            return
+
+        recovery_password, ok = QInputDialog.getText(
+            self,
+            "Восстановление супер-администратора",
+            "Введите отдельный пароль восстановления:",
+            QLineEdit.Password,
+        )
+        if not ok:
+            return
+
+        shared_folder = self._get_shared_folder()
+        if not shared_folder:
+            return
+
+        self.btn_recovery.setEnabled(False)
+        try:
+            user = recover_superadmin(
+                shared_folder, login, account_password, recovery_password
+            )
+            self.btn_recovery.setVisible(False)
+            QMessageBox.information(
+                self,
+                "Восстановление завершено",
+                "Новый супер-администратор создан. Существующие чаты, группы, "
+                "сообщения и медиа не изменялись.",
+            )
+            self.logged_in.emit(user)
+        except Exception as exc:
+            self._show_error(str(exc))
+            logger.exception("Не удалось восстановить супер-администратора")
+        finally:
+            self.btn_recovery.setEnabled(True)
 
     def _on_register_clicked(self):
         self._clear_error()
@@ -201,8 +356,36 @@ class LoginView(QWidget):
         if not self._ensure_trusted_root(shared_folder):
             return
 
+        recovery_password = None
+        if getattr(self, "_first_computer_bootstrap", False):
+            recovery_password, ok = QInputDialog.getText(
+                self,
+                "Настройка восстановления",
+                "Создайте отдельный пароль восстановления (минимум 12 символов):",
+                QLineEdit.Password,
+            )
+            if not ok:
+                return
+            if len(recovery_password) < 12:
+                self._show_error("Пароль восстановления должен содержать минимум 12 символов.")
+                return
+            confirmation, ok = QInputDialog.getText(
+                self,
+                "Подтверждение пароля восстановления",
+                "Повторите пароль восстановления:",
+                QLineEdit.Password,
+            )
+            if not ok:
+                return
+            if confirmation != recovery_password:
+                self._show_error("Пароли восстановления не совпадают.")
+                return
+
         try:
-            user = register_user(shared_folder, login, password)
+            user = register_user(
+                shared_folder, login, password,
+                recovery_password=recovery_password,
+            )
             logger.info(f"Успешная регистрация: {login}")
 
             if getattr(self, "_first_computer_bootstrap", False):

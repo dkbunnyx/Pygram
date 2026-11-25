@@ -23,11 +23,14 @@ from src.core.admin import can_delete_others_messages, can_read_all_chats
 from src.core.chat_logic import (delete_group_chat, get_chat_meta,
                                  get_group_display_name)
 from src.core.crypto import aes_decrypt, from_base64, unwrap_key
-from src.core.message import (decrypt_attachment_to_bytes, send_file,
-                              send_message, sync_messages_to_db)
+from src.core.message import decrypt_attachment_to_bytes, send_file, send_message
 from src.core.status import (DIR_STATUS, delete_message, get_deleted_messages,
                              get_reactions, get_read_messages, get_status,
                              mark_messages_read, set_reaction, set_typing)
+from src.core.event_engine import EventEngine
+from src.core.qt_signal_bridge import QtSignalBridge
+from src.core.sync_engine import SyncEngine
+from src.core.tick_engine import TickEngine
 from src.storage.local_db import LocalDB
 from src.storage.shared_store import (chat_files_dir, chat_message_dir,
                                       load_chat_keys, load_chat_meta_enc,
@@ -121,30 +124,6 @@ class MessagesModel(QAbstractListModel):
                 self.dataChanged.emit(idx, idx, [Qt.UserRole])
                 return True
         return False
-
-
-class SyncWorker(QThread):
-    finished = Signal()
-
-    def __init__(self, shared_folder, chat_id, user_fp16, user_priv_pem):
-        super().__init__()
-        self.shared_folder = shared_folder
-        self.chat_id = chat_id
-        self.user_fp16 = user_fp16
-        self.user_priv_pem = user_priv_pem
-
-    def run(self):
-        try:
-            sync_messages_to_db(
-                self.shared_folder,
-                self.chat_id,
-                self.user_fp16,
-                self.user_priv_pem,
-                prune_missing=False,  # ← НЕ True
-            )
-            self.finished.emit()
-        except Exception as e:
-            logger.error(f"Ошибка синхронизации: {e}")
 
 
 class SendWorker(QThread):
@@ -249,6 +228,7 @@ class DownloadWorker(QThread):
         self.dest_path = dest_path
 
     def run(self):
+        tmp_path = None
         try:
             self.dest_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -282,11 +262,15 @@ class DownloadWorker(QThread):
             logger.error(f"Ошибка скачивания: {e}")
             self.finished.emit(False, str(e))
 
+
         finally:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError as e:
-                logger.warning(f"Не удалось удалить временный файл {tmp_path}: {e}")
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError as e:
+                    logger.warning(
+                        f"Не удалось удалить временный файл {tmp_path}: {e}"
+                    )
 
 
 class AttachmentPreviewWorker(QThread):
@@ -390,16 +374,33 @@ class DownloadProgressDialog(QDialog):
 
 
 class ChatViewWidget(QWidget):
-    def __init__(self, shared_folder: str | Path, user, parent=None):
+    def __init__(
+        self,
+        shared_folder: str | Path,
+        user,
+        event_engine: EventEngine,
+        parent=None,
+        *,
+        event_bridge: QtSignalBridge | None = None,
+        tick_engine: TickEngine | None = None,
+        sync_engine: SyncEngine | None = None,
+    ):
         super().__init__(parent)
         self.shared_folder = shared_folder
         self.user = user
+        self.event_engine = event_engine
+        self.event_bridge = event_bridge or QtSignalBridge(event_engine, self)
+        self.tick_engine = tick_engine or TickEngine(self)
+        self.sync_engine = sync_engine or SyncEngine(self)
+        self._owns_event_bridge = event_bridge is None
+        self._owns_tick_engine = tick_engine is None
+        self._owns_sync_engine = sync_engine is None
+        self._tick_job_prefix = f"chat_view:{id(self)}"
         self.db = LocalDB()
 
         self.current_chat_id = None
         self.current_other_fp = None
 
-        self._sync_worker = None
         self._active_workers = []
 
         self.loaded_offset = 0
@@ -429,41 +430,141 @@ class ChatViewWidget(QWidget):
         self.reaction_picker.emoji_selected.connect(self._apply_reaction)
         self._reaction_msg_id = None
 
-        self.status_timer = QTimer(self)
-        self.status_timer.timeout.connect(self._update_status)
-        self.status_timer.start(1000)
-
-        self.sync_timer = QTimer(self)
-        self.sync_timer.timeout.connect(self._sync_and_render)
-        self.sync_timer.start(500)
+        # Резервная сверка. Основные обновления приходят через EventEngine;
+        # эти задачи нужны только для восстановления пропущенных событий.
+        self.tick_engine.register(
+            f"{self._tick_job_prefix}:reconcile",
+            self._sync_and_render,
+            5000,
+        )
+        self.tick_engine.register(
+            f"{self._tick_job_prefix}:presence",
+            self._update_status,
+            2500,
+        )
 
         self.typing_timer = QTimer(self)
         self.typing_timer.setSingleShot(True)
         self.typing_timer.timeout.connect(self._stop_typing)
 
-        self.transport = FileTransport(shared_folder)
-        # П.4: watchdog запускается в load_chat() на папку конкретного чата.
-        # Watch на всю шару ('.') не используем — дорого и шумно.
+        self.transport = FileTransport(
+            shared_folder,
+            event_engine=self.event_engine,
+        )
+        self.event_bridge.event_received.connect(self._on_event_published)
+        self.sync_engine.sync_finished.connect(self._on_sync_finished)
+        # Watchdog следит только за текущим чатом и служебными каталогами.
 
-    def _on_file_changed(self, path: str):
-        if self.current_chat_id and self.current_chat_id in path:
-            QTimer.singleShot(0, self._trigger_sync)
+    def _on_event_published(self, event):
+        """Обрабатывает события текущего чата в GUI-потоке."""
+        if not self.current_chat_id:
+            return
+
+        event_type = getattr(event, "event_type", "")
+        if event_type not in {
+            "file.created", "file.modified", "file.moved", "file.deleted"
+        }:
+            return
+
+        path = str(event.payload.get("path", "")).replace("\\", "/").lstrip("/")
+        if not path:
+            return
+
+        chat_id = self.current_chat_id
+        message_prefix = f"message/{chat_id}/"
+
+        if path.startswith(message_prefix):
+            # Физическое удаление сообщения не создаёт tombstone в .status.
+            # Удаляем его из локального представления сразу по имени файла.
+            if event_type == "file.deleted" and path.endswith(".bin"):
+                msg_id = Path(path).stem
+                self.messages_model.remove_message_by_id(msg_id)
+                self.db.delete_message(msg_id)
+                self._reactions_cache.pop(msg_id, None)
+                self.selected_msg_ids.discard(msg_id)
+                self._last_file_count = -1
+            else:
+                self._trigger_sync()
+            return
+
+        if path.startswith(f".status/reactions/{chat_id}_"):
+            self._refresh_reactions_if_changed()
+            return
+
+        if path.startswith(f".status/read/{chat_id}_"):
+            self._refresh_read_status_if_changed()
+            return
+
+        if path == f".status/deleted/{chat_id}.json":
+            self._sync_and_render()
+            return
+
+        # Файлы присутствия имеют вид .status/<fp16>.json.
+        if self.current_other_fp and path == f".status/{self.current_other_fp}.json":
+            self._update_status()
+            return
+
+        # Изменения .meta затрагивают имя/состав группы и обёртки ключей.
+        if path.startswith(f".meta/{chat_id}."):
+            self._refresh_group_metadata()
+
+    def _refresh_group_metadata(self) -> None:
+        if not self.current_chat_id or not self.current_chat_id.startswith("grp_"):
+            return
+
+        try:
+            keys = load_chat_keys(self.shared_folder, self.current_chat_id)
+            wrapped = keys.get("wrapped", {})
+        except FileNotFoundError:
+            self.input_widget.setVisible(False)
+            self.label_title.setText("Группа недоступна")
+            self.label_status.setText("Группа удалена или больше недоступна")
+            return
+        except Exception:
+            return
+
+        if self.user.fp16 not in wrapped:
+            self.input_widget.setVisible(False)
+            self.label_title.setText("Группа недоступна")
+            self.label_status.setText("У вас больше нет доступа к этой группе")
+            return
+
+        self.input_widget.setVisible(True)
+        self.label_status.setText("")
+        title = get_group_display_name(
+            self.shared_folder,
+            self.current_chat_id,
+            self.user.fp16,
+            self.user.priv_pem,
+        )
+        if title:
+            self.label_title.setText(title)
+            self.db.save_chat_cache(self.current_chat_id, "group", title)
 
     def _rewatch_current_chat(self) -> None:
-        """Перезапускает watchdog на папку сообщений текущего чата."""
+        """Отслеживает сообщения текущего чата и общие статусы."""
+
         try:
             self.transport.stop_watch()
-        except Exception as e:
-            logger.debug(f"stop_watch: {e}")
+        except Exception:
+            logger.exception("Ошибка остановки предыдущего watchdog")
 
         if not self.current_chat_id:
             return
 
-        rel_dir = f"message/{self.current_chat_id}"
-        try:
-            self.transport.watch(rel_dir, self._on_file_changed)
-        except Exception as e:
-            logger.error(f"Не удалось запустить watchdog на {rel_dir}: {e}")
+        directories = (
+            f"message/{self.current_chat_id}",
+            ".status",
+            ".meta",
+        )
+
+        for rel_dir in directories:
+            try:
+                self.transport.watch(rel_dir)
+            except Exception:
+                logger.exception(
+                    f"Не удалось запустить watchdog на {rel_dir}"
+                )
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -829,15 +930,37 @@ class ChatViewWidget(QWidget):
             self.loaded_offset += self.limit
 
             if incoming_to_mark:
-                # Локальная БД (для счётчика и UI)
-                self.db.mark_messages_read(self.current_chat_id, incoming_to_mark)
-                # Шара (для галочек у отправителя)
-                mark_messages_read(
-                    self.shared_folder,
-                    self.current_chat_id,
-                    self.user.fp16,
-                    incoming_to_mark,
+                chat_id = self.current_chat_id
+                msg_ids = tuple(incoming_to_mark)
+
+                QTimer.singleShot(
+                    0,
+                    lambda cid=chat_id, mids=msg_ids:
+                    self._mark_messages_read_after_display(cid, mids)
                 )
+
+    def _mark_messages_read_after_display(self, chat_id: str, msg_ids: tuple):
+        """Отмечает сообщения прочитанными после обновления интерфейса."""
+
+        # Пользователь мог успеть переключиться на другой чат.
+        if self.current_chat_id != chat_id:
+            return
+
+        try:
+            # Локальная БД — для счётчика и UI.
+            self.db.mark_messages_read(chat_id, msg_ids)
+
+            # Общая папка — для галочек у отправителя.
+            mark_messages_read(
+                self.shared_folder,
+                chat_id,
+                self.user.fp16,
+                list(msg_ids),
+            )
+        except Exception:
+            logger.exception(
+                f"Ошибка при отметке сообщений прочитанными: {chat_id}"
+            )
 
     def _get_reactions_cached(self, msg_id: str) -> dict:
         """Реакции из кэша; при отсутствии — читает и кладёт в кэш."""
@@ -970,6 +1093,8 @@ class ChatViewWidget(QWidget):
             for mid in to_remove:
                 self.messages_model.remove_message_by_id(mid)
                 self.db.delete_message(mid)
+                self._reactions_cache.pop(mid, None)
+                self.selected_msg_ids.discard(mid)
 
         # --- 2. Новые файлы сообщений ---
         msg_dir = chat_message_dir(self.shared_folder, self.current_chat_id)
@@ -1027,22 +1152,32 @@ class ChatViewWidget(QWidget):
         # --- 4. Реакции и прочтения (только при изменении) ---
         self._refresh_reactions_if_changed()
         self._refresh_read_status_if_changed()
+        if self.current_chat_id.startswith("grp_"):
+            self._refresh_group_metadata()
 
     def _trigger_sync(self):
-        if self._sync_worker and self._sync_worker.isRunning():
+        if not self.current_chat_id:
             return
 
-        self._sync_worker = SyncWorker(
-            self.shared_folder, self.current_chat_id, self.user.fp16, self.user.priv_pem
+        # Запоминаем текущее число файлов до запуска worker. Тогда завершение
+        # успешной событийной синхронизации не порождает лишний второй проход.
+        msg_dir = chat_message_dir(self.shared_folder, self.current_chat_id)
+        self._last_file_count = (
+            len(list(msg_dir.glob("*.bin"))) if msg_dir.is_dir() else 0
         )
 
-        def on_finished():
-            if self._sync_worker in self._active_workers:
-                self._active_workers.remove(self._sync_worker)
+        self.sync_engine.request_sync(
+            self.shared_folder,
+            self.current_chat_id,
+            self.user.fp16,
+            self.user.priv_pem,
+        )
 
-        self._sync_worker.finished.connect(on_finished)
-        self._active_workers.append(self._sync_worker)
-        self._sync_worker.start()
+    def _on_sync_finished(self, chat_id: str, success: bool) -> None:
+        if success and self.current_chat_id == chat_id:
+            self._sync_and_render()
+        elif not success:
+            logger.warning(f"Синхронизация чата {chat_id} завершилась с ошибкой")
 
     def _on_send_clicked(self):
         if not self.current_chat_id:
@@ -1051,6 +1186,10 @@ class ChatViewWidget(QWidget):
         text = self.input_field.text().strip()
         if not text:
             return
+
+        # Сразу сбрасываем статус набора текста при отправке.
+        self.typing_timer.stop()
+        self._stop_typing()
 
         self.input_field.clear()
 
@@ -1243,7 +1382,10 @@ class ChatViewWidget(QWidget):
             from src.ui.group_settings_view import GroupSettingsView
 
             self.group_window = GroupSettingsView(
-                self.shared_folder, self.user, self.current_chat_id
+                self.shared_folder,
+                self.user,
+                self.current_chat_id,
+                event_bridge=self.event_bridge,
             )
             self.group_window.show()
 
@@ -1383,6 +1525,34 @@ class ChatViewWidget(QWidget):
         if self.current_chat_id:
             set_typing(self.shared_folder, self.user.fp16, self.current_chat_id, False)
 
+    def shutdown(self, timeout_ms: int = 10000) -> bool:
+        """Останавливает фоновые задачи перед уничтожением виджета."""
+        for worker in tuple(self._active_workers):
+            if worker.isRunning() and not worker.wait(timeout_ms):
+                logger.warning("Фоновая задача ChatView ещё выполняется")
+                return False
+
+        self.typing_timer.stop()
+        self.transport.stop_watch()
+        self.tick_engine.unregister(f"{self._tick_job_prefix}:reconcile")
+        self.tick_engine.unregister(f"{self._tick_job_prefix}:presence")
+        try:
+            self.event_bridge.event_received.disconnect(self._on_event_published)
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            self.sync_engine.sync_finished.disconnect(self._on_sync_finished)
+        except (RuntimeError, TypeError):
+            pass
+        if self._owns_event_bridge:
+            self.event_bridge.shutdown()
+        if self._owns_sync_engine:
+            if not self.sync_engine.shutdown(timeout_ms=timeout_ms):
+                return False
+        if self._owns_tick_engine:
+            self.tick_engine.stop()
+        return True
+
     def _on_avatar_clicked(self, event):
         if not self.current_chat_id:
             return
@@ -1398,7 +1568,10 @@ class ChatViewWidget(QWidget):
             from src.ui.group_settings_view import GroupSettingsView
 
             self.group_window = GroupSettingsView(
-                self.shared_folder, self.user, self.current_chat_id
+                self.shared_folder,
+                self.user,
+                self.current_chat_id,
+                event_bridge=self.event_bridge,
             )
             self.group_window.show()
 
@@ -1473,7 +1646,6 @@ class ChatViewWidget(QWidget):
                 self.user.priv_pem,
                 msg_data.get("sender_fp16", ""),
                 attachment_data,
-                # здесь оставь остальные свои аргументы
             )
 
         except Exception as e:

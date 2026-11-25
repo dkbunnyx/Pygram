@@ -447,6 +447,11 @@ def _validate_entry(entry: dict) -> bool:
         and type(entry.get("can_manage_admins")) is bool
         and type(entry.get("can_read_all_chats")) is bool
         and type(entry.get("can_grant_delete_rights")) is bool
+        and (
+            "signature_version" not in entry
+            or type(entry.get("signature_version")) is int
+            and entry.get("signature_version") == 2
+        )
     )
 
 
@@ -471,6 +476,7 @@ def _make_entry(fp16: str, by: str, is_super_new: bool, by_priv: str) -> dict:
         "can_manage_admins": False,
         "can_read_all_chats": False,
         "can_grant_delete_rights": False,
+        "signature_version": 2,
     }
     entry["signature"] = to_base64(rsa_sign(by_priv, admin_signature_payload(entry)))
     return entry
@@ -648,6 +654,7 @@ def _change_right(
 
     # Изменение привилегий переподписывается супер-администратором.
     target["added_by"] = by
+    target["signature_version"] = 2
     target["signature"] = to_base64(rsa_sign(by_priv, admin_signature_payload(target)))
 
     _save_list(shared_folder, data)
@@ -702,6 +709,11 @@ def verify_signature(entry: dict, by_pub_pem: str) -> bool:
         return False
     try:
         signature = from_base64(entry["signature"])
-        return rsa_verify(by_pub_pem, admin_signature_payload(entry), signature)
+        if entry.get("signature_version") == 2:
+            payload = admin_signature_payload(entry)
+        else:
+            from src.core.trust import _legacy_admin_signature_payload
+            payload = _legacy_admin_signature_payload(entry)
+        return rsa_verify(by_pub_pem, payload, signature)
     except (ValueError, TypeError, KeyError):
         return False
